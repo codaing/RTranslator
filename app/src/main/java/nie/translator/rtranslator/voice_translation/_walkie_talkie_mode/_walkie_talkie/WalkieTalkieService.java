@@ -76,6 +76,71 @@ public class WalkieTalkieService extends VoiceTranslationService {
     private Translator.TranslateListener firstResultTranslateListener;
     private Translator.TranslateListener secondResultTranslateListener;
 
+    // Only one ASR -> language identification -> translation job at a time.
+    // The microphone and existing TTS queue can run in parallel with that job.
+    private static final int MAX_PENDING_AUDIO_CHUNKS = 12;
+    private final java.util.ArrayDeque<float[]> pendingAudio = new java.util.ArrayDeque<>();
+    private volatile long activeAudioJob = 0;
+    private long nextAudioJob = 0;
+    private volatile boolean headsetServiceDestroyed = false;
+    private long lastBacklogWarning = -15000;
+
+    private boolean headsetListening() {
+        return ((Global) getApplication()).isHeadsetListeningEnabled() && isMicAutomatic;
+    }
+
+    @Override
+    protected boolean keepMicDuringTTS() {
+        return headsetListening();
+    }
+
+    @Override
+    protected boolean shouldDeactivateMicDuringTTS() {
+        return !headsetListening();
+    }
+
+    // Queue operations run on the main handler. Drop the oldest waiting chunk
+    // if inference falls behind, so latency/memory do not grow without bound.
+    private void enqueueHeadsetAudio(float[] data) {
+        if (headsetServiceDestroyed || !headsetListening() || isMicMute) return;
+        if (pendingAudio.size() >= MAX_PENDING_AUDIO_CHUNKS) {
+            pendingAudio.removeFirst();
+            Log.w("walkieTalkie", "Continuous listening backlog: dropped oldest audio chunk");
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (now - lastBacklogWarning >= 15000) {
+                lastBacklogWarning = now;
+                android.widget.Toast.makeText(this,
+                        nie.translator.rtranslator.R.string.headset_queue_overflow,
+                        android.widget.Toast.LENGTH_SHORT).show();
+            }
+        }
+        pendingAudio.addLast(data);
+        processNextHeadsetAudio();
+    }
+
+    private void processNextHeadsetAudio() {
+        if (headsetServiceDestroyed || !headsetListening()) {
+            pendingAudio.clear();
+            return;
+        }
+        if (activeAudioJob != 0 || pendingAudio.isEmpty()) return;
+        if (firstLanguage == null || secondLanguage == null) {
+            pendingAudio.clear();
+            return;
+        }
+        activeAudioJob = ++nextAudioJob;
+        speechRecognizer.recognize(pendingAudio.removeFirst(), SPEECH_BEAM_SIZE,
+                firstLanguage.getCode(), secondLanguage.getCode());
+    }
+
+    private void finishHeadsetAudio(long job) {
+        if (job == 0) return;
+        mainHandler.post(() -> {
+            if (headsetServiceDestroyed || activeAudioJob != job) return;
+            activeAudioJob = 0;
+            processNextHeadsetAudio();
+        });
+    }
 
     @Override
     public void onCreate() {
@@ -231,7 +296,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
             @Override
             public void onVoiceStart() {
                 super.onVoiceStart();
-                if(ttsEngine != null){
+                if(ttsEngine != null && shouldDeactivateMicDuringTTS()){
                     mainTTSHandler.removeCallbacksAndMessages(null);  //cancel an eventual delayed resume command
                     ttsEngine.pause();
                 }
@@ -255,8 +320,12 @@ public class WalkieTalkieService extends VoiceTranslationService {
                     speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode(), secondLanguage.getCode());
 
                 }else if(isMicAutomatic) {
-                    // we start the speech recognition in both languages
-                    speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode(), secondLanguage.getCode());
+                    if (headsetListening()) {
+                        mainHandler.post(() -> enqueueHeadsetAudio(data));
+                    } else {
+                        // we start the speech recognition in both languages
+                        speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode(), secondLanguage.getCode());
+                    }
                 }
             }
 
@@ -265,6 +334,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
                 super.onVoiceEnd();
                 // we notify the client
                 WalkieTalkieService.super.notifyVoiceEnd();
+                if (!shouldDeactivateMicDuringTTS()) return;
                 // we resume tts after a delay, in case the user has not done speaking
                 mainTTSHandler.postDelayed(new Runnable() {
                     @Override
@@ -293,6 +363,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
             @Override
             public void onError(int[] reasons, long value) {
                 manualRecognizingAutoLanguage = false;
+                finishHeadsetAudio(activeAudioJob);
                 //we restart the mic here
                 startVoiceRecorder();
                 notifyMicActivated();
@@ -331,7 +402,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
                         // we save every new message in the exchanged messages so that the fragment can restore them
                         WalkieTalkieService.super.addOrUpdateMessage(message);
                         //if the tts is not active we restart the mic here
-                        if(isFinal && (ttsEngine == null || !CustomLocale.containsLanguage(ttsLanguages, outputLanguage) || !ttsEngine.isActive() || isAudioMute)){
+                        if(isFinal && (!shouldDeactivateMicDuringTTS() || ttsEngine == null || !CustomLocale.containsLanguage(ttsLanguages, outputLanguage) || !ttsEngine.isActive() || isAudioMute)){
                             startVoiceRecorder();
                             notifyMicActivated();
                         }
@@ -354,7 +425,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
             public void onFailure(int[] reasons, long value) {
                 WalkieTalkieService.super.notifyError(reasons,value);
                 //if the tts is not active we restart the mic here
-                if(ttsEngine == null || !ttsEngine.isActive() || isAudioMute){
+                if(!shouldDeactivateMicDuringTTS() || ttsEngine == null || !ttsEngine.isActive() || isAudioMute){
                     startVoiceRecorder();
                     notifyMicActivated();
                 }
@@ -374,7 +445,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
                         // we save every new message in the exchanged messages so that the fragment can restore them
                         WalkieTalkieService.super.addOrUpdateMessage(message);
                         //if the tts is not active we restart the mic here
-                        if(isFinal && (ttsEngine == null || !CustomLocale.containsLanguage(ttsLanguages, outputLanguage) || !ttsEngine.isActive() || isAudioMute)){
+                        if(isFinal && (!shouldDeactivateMicDuringTTS() || ttsEngine == null || !CustomLocale.containsLanguage(ttsLanguages, outputLanguage) || !ttsEngine.isActive() || isAudioMute)){
                             startVoiceRecorder();
                             notifyMicActivated();
                         }
@@ -397,7 +468,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
             public void onFailure(int[] reasons, long value) {
                 WalkieTalkieService.super.notifyError(reasons,value);
                 //if the tts is not active we restart the mic here
-                if(ttsEngine == null || !ttsEngine.isActive() || isAudioMute){
+                if(!shouldDeactivateMicDuringTTS() || ttsEngine == null || !ttsEngine.isActive() || isAudioMute){
                     startVoiceRecorder();
                     notifyMicActivated();
                 }
@@ -435,6 +506,9 @@ public class WalkieTalkieService extends VoiceTranslationService {
 
     @Override
     public void onDestroy() {
+        headsetServiceDestroyed = true;
+        pendingAudio.clear();
+        activeAudioJob = 0;
         Log.i("walkieTalkie", "WalkieTalkie service destroyed");
         //disconnect speechRecognizerCallback
         speechRecognizer.removeMultiCallback(speechRecognizerCallback);
@@ -487,13 +561,46 @@ public class WalkieTalkieService extends VoiceTranslationService {
     }
 
     private void translate(final String textToTranslate, final CustomLocale languageInput, final CustomLocale languageOutput, int beamSize, boolean saveResults, final Translator.TranslateListener responseListener){
+        final long job = activeAudioJob;
         if(!isMetaText(textToTranslate)) {
-            translator.translate(textToTranslate, languageInput, languageOutput, beamSize, saveResults, Global.RTranslatorMode.WALKIE_TALKIE_MODE, responseListener);
+            Translator.TranslateListener listener = responseListener;
+            if (job != 0) {
+                listener = new Translator.TranslateListener() {
+                    private final java.util.concurrent.atomic.AtomicBoolean finished = new java.util.concurrent.atomic.AtomicBoolean();
+
+                    @Override
+                    public void onTranslatedText(String original, String translated, String[] synonyms,
+                            long resultID, boolean isFinal, ResultType resultType,
+                            CustomLocale inputLanguage, CustomLocale outputLanguage) {
+                        if (headsetServiceDestroyed || finished.get()) return;
+                        if (isFinal && !finished.compareAndSet(false, true)) return;
+                        try {
+                            responseListener.onTranslatedText(original, translated, synonyms, resultID,
+                                    isFinal, resultType, inputLanguage, outputLanguage);
+                        } finally {
+                            if (isFinal) finishHeadsetAudio(job);
+                        }
+                    }
+
+                    @Override
+                    public void onFailure(int[] reasons, long value) {
+                        if (headsetServiceDestroyed || !finished.compareAndSet(false, true)) return;
+                        try {
+                            responseListener.onFailure(reasons, value);
+                        } finally {
+                            finishHeadsetAudio(job);
+                        }
+                    }
+                };
+            }
+            translator.translate(textToTranslate, languageInput, languageOutput, beamSize, saveResults,
+                    Global.RTranslatorMode.WALKIE_TALKIE_MODE, listener);
         }else{
             Log.i("walkieTalkie", "skipped translation of: "+textToTranslate+" because it is meta text");
             //we restart the mic here
             startVoiceRecorder();
             notifyMicActivated();
+            finishHeadsetAudio(job);
         }
     }
 

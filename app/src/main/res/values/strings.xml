@@ -230,6 +230,12 @@
     <string name="preference_title_language">Personal language</string>
     <string name="preference_title_tts">Text to speech</string>
     <string name="preference_title_speech_timeout">End of voice timeout</string>
+    <string name="preference_title_max_speech_length">Maximum recording length</string>
+    <string name="preference_max_speech_seconds">%1$d s</string>
+    <string name="preference_description_max_speech_length">%1$d s. Submit automatic recordings even if the speaker does not pause.</string>
+    <string name="preference_title_headset_listening">Continuous headset listening (experimental)</string>
+    <string name="preference_description_headset_listening">In automatic WalkieTalkie mode, keep listening during translation and spoken output. Use headphones to avoid feedback. Reopen WalkieTalkie after changing this setting.</string>
+    <string name="headset_queue_overflow">Translation cannot keep up. Older audio was skipped.</string>
     <string name="preference_title_prev_voice_duration">Voice anticipation duration</string>
     <string name="preference_title_beam_size">Beam Search (beta)</string>
     <string name="preference_title_models_manager">Models Manager</string>

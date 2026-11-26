@@ -852,6 +852,32 @@ public class Global extends Application implements DefaultLifecycleObserver {
         editor.apply();
     }
 
+    // Keep the upstream 29-second buffer capacity independent of this preference.
+    public static final int MIN_SPEECH_LENGTH_SECONDS = 3;
+    public static final int MAX_SPEECH_LENGTH_SECONDS = 29;
+
+    public int getMaxSpeechLengthSeconds() {
+        int value = getSharedPreferences("default", Context.MODE_PRIVATE)
+                .getInt("maxSpeechLengthSeconds", MAX_SPEECH_LENGTH_SECONDS);
+        return Math.max(MIN_SPEECH_LENGTH_SECONDS, Math.min(MAX_SPEECH_LENGTH_SECONDS, value));
+    }
+
+    public void setMaxSpeechLengthSeconds(int value) {
+        getSharedPreferences("default", Context.MODE_PRIVATE).edit()
+                .putInt("maxSpeechLengthSeconds", Math.max(MIN_SPEECH_LENGTH_SECONDS,
+                        Math.min(MAX_SPEECH_LENGTH_SECONDS, value))).apply();
+    }
+
+    public boolean isHeadsetListeningEnabled() {
+        return getSharedPreferences("default", Context.MODE_PRIVATE)
+                .getBoolean("headsetListeningEnabled", false);
+    }
+
+    public void setHeadsetListeningEnabled(boolean enabled) {
+        getSharedPreferences("default", Context.MODE_PRIVATE).edit()
+                .putBoolean("headsetListeningEnabled", enabled).apply();
+    }
+
     public int getSpeechTimeout() {
         if (speechTimeout == -1) {
             final SharedPreferences sharedPreferences = this.getSharedPreferences("default", Context.MODE_PRIVATE);

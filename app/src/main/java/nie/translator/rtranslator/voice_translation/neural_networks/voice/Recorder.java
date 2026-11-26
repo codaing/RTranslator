@@ -248,6 +248,14 @@ public class Recorder {
     //  thread itself.
     // =====================================================================================
 
+    /** Unlike start(), this does not reset an active recording session. */
+    public void startIfStopped() {
+        synchronized (lifecycleLock) {
+            if (destroyed || running || pendingStart) return;
+            start();
+        }
+    }
+
     public void start() {
         if (destroyed) return;
         synchronized (lifecycleLock) {
@@ -538,13 +546,20 @@ public class Recorder {
                                 }
                             }
                             mLastVoiceHeardMillis = now;
-                            if (now - (mVoiceStartedMillis - global.getPrevVoiceDuration()) > MAX_SPEECH_LENGTH_MILLIS) {  //if we are listening voice for more than MAX_SPEECH_LENGTH_MILLIS
+                            if (isManualMode && now - (mVoiceStartedMillis - global.getPrevVoiceDuration()) > MAX_SPEECH_LENGTH_MILLIS) {
                                 executeEnd();
                             }
                         } else if (mLastVoiceHeardMillis != Long.MAX_VALUE) {   // use Long's maximum limit to indicate that we have no voice (the mic is not listening)
                             if ((now - mLastVoiceHeardMillis > global.getSpeechTimeout()) || shouldVirtualMuteMic()) {  //if we had not heard voice for global.getSpeechTimeout() ms or the mic is virtually muted
                                 executeEnd();
                             }
+                        }
+                        // Count actual captured samples, including pre-roll and short silences.
+                        // Check every frame, not just VAD-positive frames; retain the 30 s buffer.
+                        if (!isManualMode && mLastVoiceHeardMillis != Long.MAX_VALUE
+                                && getMBufferRangeSize(startVoiceIndex, tailIndex)
+                                >= global.getMaxSpeechLengthSeconds() * sampleRate) {
+                            executeEnd();
                         }
                     }
                 }

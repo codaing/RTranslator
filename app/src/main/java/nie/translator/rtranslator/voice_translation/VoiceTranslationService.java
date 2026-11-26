@@ -131,7 +131,7 @@ public abstract class VoiceTranslationService extends GeneralService {
             void onUtteranceStarting(GuiMessage message, boolean first) {
                 //if (ttsEngine != null && shouldDeactivateMicDuringTTS() && ttsEngine.isEmpty() && !ttsEngine.isPaused()) {
                 notifyTTSStarted(String.valueOf(message.getMessageID()));
-                if(first) {
+                if(first && !keepMicDuringTTS()) {
                     if (isMicAutomatic) stopVoiceRecorder();
                     notifyMicDeactivated();   // we notify the client
                 }
@@ -233,7 +233,11 @@ public abstract class VoiceTranslationService extends GeneralService {
                 initializeVoiceRecorder();
             }
             if (mVoiceRecorder != null && !isMicMute) {
-                mVoiceRecorder.start();
+                if (!keepMicDuringTTS()) {
+                    mVoiceRecorder.start();
+                } else {
+                    mVoiceRecorder.startIfStopped();
+                }
             }
         }
     }
@@ -276,6 +280,10 @@ public abstract class VoiceTranslationService extends GeneralService {
                 ttsEngine.speak(message, language);
             }
         }
+    }
+
+    protected boolean keepMicDuringTTS() {
+        return false;
     }
 
     protected boolean shouldDeactivateMicDuringTTS() {

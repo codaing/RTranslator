@@ -208,6 +208,36 @@ public class SettingsFragment extends PreferenceFragmentCompat {
         // change microphone sensibility initialization
         SeekBarPreference prevVoiceDurationPreference = (SeekBarPreference) findPreference("PrevVoiceDurationSetting");
         prevVoiceDurationPreference.initialize(activity, SeekBarPreference.PREV_VOICE_DURATION_MODE);
+
+        // Use the same named preferences as the recorder/service, not the
+        // default PreferenceManager file. The XML widgets are non-persistent.
+        androidx.preference.ListPreference maxLength = (androidx.preference.ListPreference) findPreference("MaxSpeechLengthSetting");
+        int count = Global.MAX_SPEECH_LENGTH_SECONDS - Global.MIN_SPEECH_LENGTH_SECONDS + 1;
+        CharSequence[] entries = new CharSequence[count];
+        CharSequence[] values = new CharSequence[count];
+        for (int i = 0; i < count; i++) {
+            int seconds = Global.MIN_SPEECH_LENGTH_SECONDS + i;
+            entries[i] = getString(R.string.preference_max_speech_seconds, seconds);
+            values[i] = String.valueOf(seconds);
+        }
+        maxLength.setEntries(entries);
+        maxLength.setEntryValues(values);
+        maxLength.setValue(String.valueOf(global.getMaxSpeechLengthSeconds()));
+        maxLength.setSummary(getString(R.string.preference_description_max_speech_length,
+                global.getMaxSpeechLengthSeconds()));
+        maxLength.setOnPreferenceChangeListener((preference, value) -> {
+            int seconds = Integer.parseInt(value.toString());
+            global.setMaxSpeechLengthSeconds(seconds);
+            maxLength.setSummary(getString(R.string.preference_description_max_speech_length, seconds));
+            return true;
+        });
+
+        androidx.preference.SwitchPreferenceCompat headset = (androidx.preference.SwitchPreferenceCompat) findPreference("HeadsetListeningSetting");
+        headset.setChecked(global.isHeadsetListeningEnabled());
+        headset.setOnPreferenceChangeListener((preference, value) -> {
+            global.setHeadsetListeningEnabled((Boolean) value);
+            return true;
+        });
     }
 
     @Override
