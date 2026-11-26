@@ -295,6 +295,40 @@ public class Recognizer extends NeuralNetworkApi {
         }.start();
     }
 
+    /**
+     * Single-language transcription with a language check using Whisper's first
+     * decoder logits. Rejected chunks return UNDEFINED_TEXT to this job's listener.
+     */
+    public void recognizeFiltered(final float[] data, int beamSize,
+                                  final String languageCode, final RecognizerListener listener) {
+        new Thread("recognizer-filtered") {
+            @Override
+            public void run() {
+                synchronized (lock) {
+                    DataContainer request = new DataContainer(data, beamSize, languageCode);
+                    request.filteredListener = listener;
+                    dataToRecognize.addLast(request);
+                    if (!recognizing) recognize();
+                }
+            }
+        }.start();
+    }
+
+    private int detectLanguageToken(float[] logits) {
+        int best = -1;
+        float bestScore = Float.NEGATIVE_INFINITY;
+        for (int i = 0; i < LANGUAGES.length; i++) {
+            int token = START_TOKEN_ID + 1 + i;
+            if (token >= logits.length) break;
+            float score = logits[token];
+            if (Float.isFinite(score) && score > bestScore) {
+                best = token;
+                bestScore = score;
+            }
+        }
+        return best;
+    }
+
     private void recognize() {
         recognizing = true;
         DataContainer data = dataToRecognize.pollFirst();
@@ -310,6 +344,7 @@ public class Recognizer extends NeuralNetworkApi {
                     if(maxTokens > MAX_TOKENS){
                         maxTokens = MAX_TOKENS;
                     }
+                    boolean rejectedLanguage = false;
                     boolean execution1HitMaxLength = false;
                     boolean execution2HitMaxLength = false;
 
@@ -443,6 +478,18 @@ public class Recognizer extends NeuralNetworkApi {
                         decoderOutput = (OnnxTensor) result.get("logits").get();
                         value = (float[][][]) decoderOutput.getValue();
                         outputValues = value[0][0];
+                        // The first decoder input is <|startoftranscript|>.
+                        // Whisper predicts the spoken language at this position.
+                        if (j == 1 && data.filteredListener != null) {
+                            int detected = detectLanguageToken(outputValues);
+                            if (detected != languageID || languageID < 0) {
+                                rejectedLanguage = true;
+                                Log.i("recognizer", "Skipped audio: detected language token "
+                                        + detected + ", expected " + languageID);
+                                inputIDsTensor = null; // already closed above
+                                break;
+                            }
+                        }
                         if(!finished1) {
                             max = Utils.getIndexOfLargest(outputValues);
                             completeOutput.add(max);
@@ -503,7 +550,10 @@ public class Recognizer extends NeuralNetworkApi {
 
                     //execution of the detokenizer
                     Map detokenizerInputs = (Map) (new LinkedHashMap());
-                    if(batchSize == 1) {
+                    if (rejectedLanguage) {
+                        data.filteredListener.onSpeechRecognizedResult(
+                                UNDEFINED_TEXT, data.languageCode, 0, true);
+                    } else if(batchSize == 1) {
                         String finalText = UNDEFINED_TEXT;
                         if(!execution1HitMaxLength) {
                             int[] sequences = completeOutput.stream().mapToInt(i -> i).toArray();
@@ -516,8 +566,12 @@ public class Recognizer extends NeuralNetworkApi {
                         android.util.Log.i("result", "result: " + correctText(finalText));
                         android.util.Log.i("score", "score: " + outputProbability1);
 
-                        outputs.close();
-                        notifyResult(correctText(finalText), data.languageCode, outputProbability1, true);
+                        if (data.filteredListener != null) {
+                            data.filteredListener.onSpeechRecognizedResult(
+                                    correctText(finalText), data.languageCode, outputProbability1, true);
+                        } else {
+                            notifyResult(correctText(finalText), data.languageCode, outputProbability1, true);
+                        }
 
                     }else{
                         String firstText = UNDEFINED_TEXT;
@@ -548,6 +602,9 @@ public class Recognizer extends NeuralNetworkApi {
 
                         notifyMultiResult(correctText(firstText), data.languageCode, outputProbability1, correctText(secondText), data.languageCode2, outputProbability2);
                     }
+                    // Close the last decoder output and the unused next-token input.
+                    if (result != null) result.close();
+                    if (inputIDsTensor != null) inputIDsTensor.close();
                     //closing all results
                     outputs.close();
                     outputInit.close();
@@ -557,9 +614,15 @@ public class Recognizer extends NeuralNetworkApi {
 
                 } catch (Exception e) {
                     e.printStackTrace();
-                    notifyError(new int[]{ErrorCodes.ERROR_EXECUTING_MODEL}, 0);
+                    if (data.filteredListener != null) {
+                        data.filteredListener.onError(new int[]{ErrorCodes.ERROR_EXECUTING_MODEL}, 0);
+                    } else {
+                        notifyError(new int[]{ErrorCodes.ERROR_EXECUTING_MODEL}, 0);
+                    }
                 }
             }
+        } else if (data != null && data.filteredListener != null) {
+            data.filteredListener.onError(new int[]{ErrorCodes.ERROR_EXECUTING_MODEL}, 0);
         }
         if (!dataToRecognize.isEmpty()){
             recognize();
@@ -679,6 +742,7 @@ public class Recognizer extends NeuralNetworkApi {
         private String languageCode;
         private String languageCode2;
         private int beamSize;
+        private RecognizerListener filteredListener;
 
         private DataContainer(float[] data, int beamSize, String languageCode){
             this.data = data;

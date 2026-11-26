@@ -128,9 +128,50 @@ public class WalkieTalkieService extends VoiceTranslationService {
             pendingAudio.clear();
             return;
         }
-        activeAudioJob = ++nextAudioJob;
-        speechRecognizer.recognize(pendingAudio.removeFirst(), SPEECH_BEAM_SIZE,
-                firstLanguage.getCode(), secondLanguage.getCode());
+        final long job = ++nextAudioJob;
+        activeAudioJob = job;
+        final float[] audio = pendingAudio.removeFirst();
+        int sourceMode = ((Global) getApplication()).getHeadsetSourceMode();
+        if (sourceMode == Global.HEADSET_SOURCE_AUTO) {
+            speechRecognizer.recognize(audio, SPEECH_BEAM_SIZE,
+                    firstLanguage.getCode(), secondLanguage.getCode());
+            return;
+        }
+
+        final boolean fromFirst = sourceMode == Global.HEADSET_SOURCE_FIRST;
+        final CustomLocale source = fromFirst ? firstLanguage : secondLanguage;
+        final CustomLocale target = fromFirst ? secondLanguage : firstLanguage;
+        final Translator.TranslateListener listener = fromFirst
+                ? firstResultTranslateListener : secondResultTranslateListener;
+
+        speechRecognizer.recognizeFiltered(audio, SPEECH_BEAM_SIZE, source.getCode(),
+                new RecognizerListener() {
+                    @Override
+                    public void onSpeechRecognizedResult(String text, String languageCode,
+                                                         double confidenceScore, boolean isFinal) {
+                        if (!isFinal) return;
+                        mainHandler.post(() -> {
+                            if (headsetServiceDestroyed || activeAudioJob != job) return;
+                            if (!headsetListening() || isMicMute
+                                    || !source.equalsLanguage(fromFirst ? firstLanguage : secondLanguage)
+                                    || !target.equalsLanguage(fromFirst ? secondLanguage : firstLanguage)
+                                    || isMetaText(text) || text.trim().isEmpty()) {
+                                finishHeadsetAudio(job);
+                                return;
+                            }
+                            translate(text, source, target, TRANSLATOR_BEAM_SIZE, false, listener);
+                        });
+                    }
+
+                    @Override
+                    public void onError(int[] reasons, long value) {
+                        mainHandler.post(() -> {
+                            if (headsetServiceDestroyed || activeAudioJob != job) return;
+                            WalkieTalkieService.super.notifyError(reasons, value);
+                            finishHeadsetAudio(job);
+                        });
+                    }
+                });
     }
 
     private void finishHeadsetAudio(long job) {

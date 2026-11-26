@@ -234,8 +234,26 @@ public class SettingsFragment extends PreferenceFragmentCompat {
 
         androidx.preference.SwitchPreferenceCompat headset = (androidx.preference.SwitchPreferenceCompat) findPreference("HeadsetListeningSetting");
         headset.setChecked(global.isHeadsetListeningEnabled());
+
+        androidx.preference.ListPreference sourceMode =
+                (androidx.preference.ListPreference) findPreference("HeadsetSourceSetting");
+        sourceMode.setEntries(new CharSequence[]{
+                getString(R.string.headset_source_auto),
+                getString(R.string.headset_source_first),
+                getString(R.string.headset_source_second)});
+        sourceMode.setEntryValues(new CharSequence[]{"0", "1", "2"});
+        sourceMode.setValue(String.valueOf(global.getHeadsetSourceMode()));
+        sourceMode.setSummary(sourceMode.getEntry());
+        sourceMode.setEnabled(headset.isChecked());
+        sourceMode.setOnPreferenceChangeListener((preference, value) -> {
+            int mode = Integer.parseInt(value.toString());
+            global.setHeadsetSourceMode(mode);
+            sourceMode.setSummary(sourceMode.getEntries()[mode]);
+            return true;
+        });
         headset.setOnPreferenceChangeListener((preference, value) -> {
             global.setHeadsetListeningEnabled((Boolean) value);
+            sourceMode.setEnabled((Boolean) value);
             return true;
         });
     }

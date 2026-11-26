@@ -868,6 +868,22 @@ public class Global extends Application implements DefaultLifecycleObserver {
                         Math.min(MAX_SPEECH_LENGTH_SECONDS, value))).apply();
     }
 
+    public static final int HEADSET_SOURCE_AUTO = 0;
+    public static final int HEADSET_SOURCE_FIRST = 1;
+    public static final int HEADSET_SOURCE_SECOND = 2;
+
+    public int getHeadsetSourceMode() {
+        int mode = getSharedPreferences("default", Context.MODE_PRIVATE)
+                .getInt("headsetSourceMode", HEADSET_SOURCE_FIRST);
+        return Math.max(HEADSET_SOURCE_AUTO, Math.min(HEADSET_SOURCE_SECOND, mode));
+    }
+
+    public void setHeadsetSourceMode(int mode) {
+        getSharedPreferences("default", Context.MODE_PRIVATE).edit()
+                .putInt("headsetSourceMode",
+                        Math.max(HEADSET_SOURCE_AUTO, Math.min(HEADSET_SOURCE_SECOND, mode))).apply();
+    }
+
     public boolean isHeadsetListeningEnabled() {
         return getSharedPreferences("default", Context.MODE_PRIVATE)
                 .getBoolean("headsetListeningEnabled", false);
