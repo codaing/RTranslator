@@ -107,7 +107,7 @@ def main():
         onnx.checker.check_model(str(model_path))
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         results = []
-        for inputs in examples:
+        for case, inputs in enumerate(examples):
             expected = wrapper(*inputs)
             if isinstance(expected, torch.Tensor):
                 expected = (expected,)
@@ -119,6 +119,9 @@ def main():
                 if not np.isfinite(a).all():
                     raise RuntimeError("Non-finite ONNX output")
                 np.testing.assert_allclose(a, e, rtol=0.02, atol=0.002)
+            np.savez(args.output / f"{args.component}.case{case}.npz",
+                     **{f"input_{n}": t.numpy() for n, t in zip(names, inputs)},
+                     **{f"output_{n}": v.detach().cpu().numpy() for n, v in zip(outputs, expected)})
             results.append({"input_shapes": [list(t.shape) for t in inputs], "seconds": elapsed})
     marker.write_text(json.dumps({"component": args.component, "precision": "fp32",
                                   "parity": "PASS", "tests": results}, indent=2) + "\n")

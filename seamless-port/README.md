@@ -2,7 +2,7 @@
 
 Goal: continuous Mandarin lecture audio to English speech on Pixel 9a, with no Android TextToSpeech, no Whisper/HY-MT cascade, no cloud service, and no fixed utterance cutoff.
 
-This experimental branch deliberately leaves the functioning RTranslator APK alone. It contains an offline reference runner for the actual Meta SeamlessStreaming S2ST pipeline, an ONNX component-export experiment with numerical checks, and an Android English unit-vocoder adapter. It does not yet wire the model into the Android UI. Do not distribute an APK from this branch as a SeamlessStreaming translator.
+This experimental branch deliberately leaves the functioning RTranslator APK alone. It contains an offline reference runner for the actual Meta SeamlessStreaming S2ST pipeline, an ONNX component-export experiment with numerical checks, and an Android English unit-vocoder adapter. It does not yet wire the model into the Android UI. The experimental release APK built on this branch compiles the existing Android code and vocoder adapter only; it is not a SeamlessStreaming translator.
 
 ## Upstream and model constraints
 
@@ -43,6 +43,19 @@ python seamless-port/export_components.py decoder ./seamless-models
 These experiments use actual upstream weights, batch one and variable time dimensions. The exporter checks each candidate against PyTorch on multiple input lengths, using the CPU ONNX Runtime provider, and publishes a PASS marker only after successful numerical comparison. An export or parity failure is a blocker, not evidence that the component works. The encoder/decoder experiments need substantial workstation RAM; they are not optimized mobile graphs. The decoder uses a complete target prefix for each call, not KV-cache export. The Python agent remains the reference for read/write decisions and synthesis alignment.
 
 The Android EnglishUnitVocoder class accepts only a successfully exported English vocoder graph and acoustic unit IDs from the future UnitY2 runtime, returning 16 kHz PCM. It uses ONNX Runtime already included in the app, not Android TTS. It is not hooked up to the existing translator.
+
+## INT8 deployment target (experimental)
+
+Quantization targets signed INT8 weights for constant-weight MatMul/Gemm operations in the encoder and monotonic decoder. Dynamic activation quantization may add runtime overhead; other operators remain floating point. Keep the vocoder FP32 initially, and measure rather than assume speedup. The actual model size will differ from the theoretical parameter estimate.
+
+After each FP32 export succeeds:
+```sh
+python seamless-port/quantize_int8.py encoder ./seamless-models
+python seamless-port/quantize_int8.py decoder ./seamless-models
+```
+The quantizer requires the FP32 validation report and saved test inputs/reference outputs. It uses ONNX Runtime dynamic QInt8 per-channel quantization, writes external tensor data, and checks every output against the FP32 references. For decoder logits it checks top-token agreement, and for monotonic attention it checks the read/write decision at threshold 0.5. Synthetic component fixtures are a first gate only, not a Mandarin speech quality benchmark. Rejected graphs must not be deployed. Run real-audio parity, sustained latency and memory tests before selecting a mobile execution provider.
+
+The source-check workflow also exercises the quantizer on a tiny synthetic ONNX model, with no checkpoint download. The separate experimental APK workflow compiles the Android vocoder adapter but does not package the model weights or enable SeamlessStreaming inference.
 
 Remaining work, in order:
 1. Validate encoder, decoder and vocoder exports on real checkpoints. Verify dynamic shapes, numerical parity and output audio.

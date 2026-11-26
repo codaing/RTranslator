@@ -1,0 +1,47 @@
+name: Build Seamless port experimental APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [seamless-streaming]
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Checkout source and native dependencies
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          lfs: true
+      - name: Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK, NDK and CMake
+        shell: bash
+        run: |
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          # yes receives SIGPIPE when sdkmanager exits; preserve sdkmanager status.
+          set +o pipefail
+          yes | "$SDKMANAGER" --licenses > /dev/null
+          set -o pipefail
+          "$SDKMANAGER" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0" "ndk;28.0.12674087" "cmake;3.22.1"
+      - name: Build ARM64 release APK
+        run: bash ./gradlew :app:assembleRelease --stacktrace --no-daemon
+      - name: Verify APK
+        run: |
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: RTranslator-seamless-port-experimental-NOT-READY
+          path: app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
