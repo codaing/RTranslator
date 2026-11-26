@@ -34,14 +34,14 @@ jobs:
           yes | "$SDKMANAGER" --licenses > /dev/null
           set -o pipefail
           "$SDKMANAGER" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0" "ndk;28.0.12674087" "cmake;3.22.1"
-      - name: Build ARM64 debug APK
-        run: bash ./gradlew :app:assembleDebug --stacktrace --no-daemon
+      - name: Build ARM64 release APK
+        run: bash ./gradlew :app:assembleRelease --stacktrace --no-daemon
       - name: Verify APK
         run: |
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/debug/app-debug.apk
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: RTranslator-headset-arm64
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: RTranslator-headset-arm64-release
+          path: app/build/outputs/apk/release/app-release.apk
           if-no-files-found: error
