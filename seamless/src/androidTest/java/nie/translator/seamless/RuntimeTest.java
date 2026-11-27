@@ -49,12 +49,15 @@ public class RuntimeTest {
         }
     }
     @Test public void fourModelStreamingChainProducesAudioBeforeEof() throws Exception {
-        chain("test-model-pack.zip",false);
+        chain("test-model-pack.zip",false,false);
     }
     @Test public void cachedDecoderProducesAudioBeforeEof() throws Exception {
-        chain("test-incremental-pack.zip",true);
+        chain("test-incremental-pack.zip",true,false);
     }
-    private void chain(String pack,boolean cached)throws Exception{
+    @Test public void quietCpuCachedDecoderPreservesSyntheticAudio() throws Exception {
+        chain("test-incremental-pack.zip",true,true);
+    }
+    private void chain(String pack,boolean cached,boolean quiet)throws Exception{
         // Synthetic graphs validate application wiring, not translation quality.
         android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
         File parent=new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir(),"stream-test");
@@ -66,7 +69,7 @@ public class RuntimeTest {
             assertEquals(cached,ModelPack.incremental(dir));
             assertTrue(new File(dir,"encoder.int8.onnx.weights").isFile());
             java.util.List<float[]> output=new java.util.ArrayList<>();
-            try(StreamingEngine engine=new StreamingEngine(dir,false)){
+            try(StreamingEngine engine=new StreamingEngine(dir,false,false,false,quiet)){
                 assertEquals(cached?"incremental-fp16-kv-cache":"full-prefix-int8",engine.decoderMode());
                 short[] pcm=new short[5120];
                 for(int i=0;i<6;i++)engine.push(pcm,false,output::add);
@@ -79,6 +82,12 @@ public class RuntimeTest {
                 engine.push(pcm,false,output::add);
                 engine.push(new short[0],true,output::add);
                 assertEquals("no duplicate output after EOF",1,output.size());
+                assertTrue(engine.stats.calls(StageStats.ENCODER)>0);
+                assertTrue(engine.stats.calls(StageStats.PREFILL)>0);
+                assertTrue(engine.stats.calls(StageStats.COMMA)>0);
+                assertTrue(engine.stats.calls(StageStats.UNITS)>0);
+                assertEquals(1,engine.stats.calls(StageStats.VOCODER));
+                if(cached)assertTrue(engine.stats.calls(StageStats.STEP)>0);
             }
         } finally {ModelPack.clear(parent);}
     }

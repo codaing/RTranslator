@@ -20,8 +20,12 @@ public final class EnglishUnitVocoder implements AutoCloseable {
     private final OrtSession session;
 
     public EnglishUnitVocoder(String modelPath) throws OrtException {
+        this(modelPath,false);
+    }
+    EnglishUnitVocoder(String modelPath,boolean quietCpu) throws OrtException {
         environment = OrtEnvironment.getEnvironment();
         try (OrtSession.SessionOptions options = new OrtSession.SessionOptions()) {
+            if(quietCpu)CpuTuning.quiet(options,false);
             session = environment.createSession(modelPath, options);
         }
     }

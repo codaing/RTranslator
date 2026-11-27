@@ -16,7 +16,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private TextView status;
     private Button start,load,stop,benchmark,copyReport;
-    private CheckBox rollover, xnnpack, nnapi;
+    private CheckBox rollover, xnnpack, nnapi, quietCpu;
     private volatile LiveAudio live;
     private volatile boolean closed, busy, stopRequested;
     private volatile String lastReport;
@@ -28,8 +28,9 @@ public final class MainActivity extends Activity {
         TextView title=new TextView(this);title.setText("SeamlessStreaming • Mandarin → English");title.setTextSize(24);panel.addView(title);
         status=new TextView(this);status.setText("EXPERIMENTAL — model conversion and full speech translation not validated. Headphones required. 60-second / 100-token safety limit. Optional quiet-boundary reset is unvalidated. Other languages are not filtered.");panel.addView(status);
         rollover=new CheckBox(this);rollover.setText("Experimental adaptive context reset (may omit or repeat speech)");rollover.setChecked(false);panel.addView(rollover);
-        xnnpack=new CheckBox(this);xnnpack.setText("Try XNNPACK on FP32 acoustic-unit and vocoder models");xnnpack.setChecked(false);panel.addView(xnnpack);
+        xnnpack=new CheckBox(this);xnnpack.setText("Try XNNPACK on acoustic-unit decoder (experimental)");xnnpack.setChecked(false);panel.addView(xnnpack);
         nnapi=new CheckBox(this);nnapi.setText("Try Android NNAPI on the speech encoder (experimental)");nnapi.setChecked(false);panel.addView(nnapi);
+        quietCpu=new CheckBox(this);quietCpu.setText("Quiet CPU pools (experimental: 4 threads, no idle spinning)");quietCpu.setChecked(false);panel.addView(quietCpu);
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
         benchmark=new Button(this);benchmark.setText("Benchmark local 16 kHz mono PCM WAV");panel.addView(benchmark);
@@ -47,7 +48,7 @@ public final class MainActivity extends Activity {
         stop.setOnClickListener(v->stopLive());
         ScrollView scroll=new ScrollView(this);scroll.addView(panel);setContentView(scroll);buttons();
     }
-    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
     private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
     private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -71,10 +72,10 @@ public final class MainActivity extends Activity {
     private void startLive(){
         if(busy)return;
         final boolean adaptive=rollover.isChecked();
-        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked();
+        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked(),useQuiet=quietCpu.isChecked();
         busy=true;stopRequested=false;buttons();show("Loading four model sessions…");
         worker.execute(()->{
-            try(StreamingEngine engine=new StreamingEngine(modelDir(),adaptive,useXnnpack,useNnapi)){
+            try(StreamingEngine engine=new StreamingEngine(modelDir(),adaptive,useXnnpack,useNnapi,useQuiet)){
                 if(stopRequested||closed)return;
                 LiveAudio audio=new LiveAudio(getSystemService(AudioManager.class),this::show);live=audio;
                 if(stopRequested||closed){audio.close();return;}
@@ -84,13 +85,13 @@ public final class MainActivity extends Activity {
         });
     }
     private void runBenchmark(Uri uri){
-        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked();
+        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked(),useQuiet=quietCpu.isChecked();
         busy=true;stopRequested=false;lastReport=null;buttons();show("Reading benchmark WAV…");
         worker.execute(()->{
             try(InputStream in=getContentResolver().openInputStream(uri)){
                 if(in==null)throw new IOException("Cannot open WAV");
                 lastReport=OfflineBenchmark.run(modelDir(),in,()->stopRequested||closed,this::show,
-                    useXnnpack,useNnapi);
+                    useXnnpack,useNnapi,useQuiet);
                 show(lastReport);
             }catch(Exception|OutOfMemoryError e){lastReport="Benchmark stopped: "+e;show(lastReport);}
             finally{done();}
