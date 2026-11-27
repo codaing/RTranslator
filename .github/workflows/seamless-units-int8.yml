@@ -1,0 +1,45 @@
+name: Acoustic unit INT8 independent validation
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless-port/units_quant_experiment.py'
+      - '.github/workflows/seamless-units-int8.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  units-int8:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pinned reference and ONNX runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 ffmpeg
+          python -m pip install 'numpy<2' 'torch==2.1.1' 'torchaudio==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless 'numpy<2' 'onnx==1.16.2' 'onnxruntime==1.18.1'
+      - name: Export validated FP32 acoustic units
+        run: |
+          mkdir -p model-check
+          python -u seamless-port/export_units.py model-check 2>&1 | tee model-check/export.log
+      - name: Create independent reference fixtures
+        run: python -u seamless-port/units_quant_experiment.py fixtures model-check 2>&1 | tee model-check/fixtures.log
+      - name: Quantize and compare durations and units
+        run: python -u seamless-port/units_quant_experiment.py evaluate model-check 2>&1 | tee model-check/int8.log
+      - name: Upload experiment reports only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acoustic-unit-int8-reports
+          path: |
+            model-check/*.json
+            model-check/*.log
+          if-no-files-found: warn

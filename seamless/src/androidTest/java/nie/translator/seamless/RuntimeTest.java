@@ -70,4 +70,42 @@ public class RuntimeTest {
             ModelPack.verify(dir);
         }finally{ModelPack.clear(parent);}
     }
+    @Test public void probeNativeLowBitMatmul() throws Exception {
+        android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
+        ai.onnxruntime.OrtEnvironment env=ai.onnxruntime.OrtEnvironment.getEnvironment();
+        int supported=0;
+        for(int bits:new int[]{4,8}){
+            String file="test-matmul-"+bits+"bit.onnx";
+            byte[] model;
+            try(InputStream in=context.getAssets().open(file);
+                java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream()){
+                byte[] b=new byte[4096];int n;
+                while((n=in.read(b))!=-1)out.write(b,0,n);
+                model=out.toByteArray();
+            }
+            try(ai.onnxruntime.OrtSession.SessionOptions opts=new ai.onnxruntime.OrtSession.SessionOptions()){
+                opts.setIntraOpNumThreads(2);
+                ai.onnxruntime.OrtSession session;
+                try{session=env.createSession(model,opts);}
+                catch(ai.onnxruntime.OrtException unavailable){
+                    android.util.Log.w("LowBitProbe","bits="+bits+" session unavailable: "+unavailable.getMessage());
+                    continue;
+                }
+                try(ai.onnxruntime.OrtSession s=session){
+                    float[][] input=new float[2][32];
+                    java.util.Arrays.fill(input[0],1f);
+                    java.util.Arrays.fill(input[1],-0.5f);
+                    try(ai.onnxruntime.OnnxTensor x=ai.onnxruntime.OnnxTensor.createTensor(env,input);
+                        ai.onnxruntime.OrtSession.Result result=s.run(java.util.Collections.singletonMap("x",x))){
+                        float[][] y=(float[][])result.get(0).getValue();
+                        assertArrayEquals(new float[]{8f,-16f},y[0],0.001f);
+                        assertArrayEquals(new float[]{-4f,8f},y[1],0.001f);
+                    }
+                    supported++;
+                    android.util.Log.i("LowBitProbe","bits="+bits+" numeric probe PASS");
+                }
+            }
+        }
+        assertTrue("Neither packed low-bit operator could load",supported>0);
+    }
 }

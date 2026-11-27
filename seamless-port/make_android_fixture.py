@@ -95,3 +95,22 @@ with tempfile.TemporaryDirectory() as temp:
                 if corrupt and p.name=="tokenizer.json":
                     z.writestr(p.name,p.read_bytes()+b" ")
                 else:z.write(p,p.name)
+
+# Probe the actual Android ORT contrib operator with known packed weights.
+# Input K=32, N=2, block=16. Unsigned symmetric midpoint is 8 or 128.
+# Output columns have weights +0.25 and -0.5. No explicit zero points.
+for bits in (4,8):
+    mid=1<<(bits-1)
+    q=np.empty((2,2,16),np.uint8)
+    q[0,:,:]=mid+1
+    q[1,:,:]=mid-2
+    packed=(q[:,:,0::2] | (q[:,:,1::2]<<4)) if bits==4 else q
+    model=h.make_model(h.make_graph([
+        h.make_node("MatMulNBits",["x","packed","scales"],["y"],domain="com.microsoft",
+                    K=32,N=2,bits=bits,block_size=16,accuracy_level=0)],
+        "native_lowbit_probe",[vi("x",T.FLOAT,["rows",32])],
+        [vi("y",T.FLOAT,["rows",2])],
+        [init("packed",packed,np.uint8),init("scales",[0.25]*4,np.float32)]),
+        opset_imports=[h.make_opsetid("",17),h.make_opsetid("com.microsoft",1)],ir_version=9)
+    onnx.checker.check_model(model)
+    onnx.save(model,out/f"test-matmul-{bits}bit.onnx")
