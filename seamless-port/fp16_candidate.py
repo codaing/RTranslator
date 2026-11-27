@@ -5,7 +5,7 @@ import time
 import numpy as np
 import onnx
 import onnxruntime as ort
-from onnxconverter_common.float16 import convert_float_to_float16
+from onnxconverter_common.float16 import convert_float_to_float16, DEFAULT_OP_BLOCK_LIST
 
 
 def nrms(actual,expected):
@@ -46,6 +46,7 @@ def main(component,directory):
         result["blocked_sdpa_nodes"]=len(blocked)
         start=time.monotonic()
         model=convert_float_to_float16(model,keep_io_types=True,disable_shape_infer=True,
+                                       op_block_list=list(DEFAULT_OP_BLOCK_LIST)+["Mul"],
                                        node_block_list=blocked)
         onnx.save_model(model,str(output),save_as_external_data=True,all_tensors_to_one_file=True,
             location=output.name+".weights",size_threshold=1024)
