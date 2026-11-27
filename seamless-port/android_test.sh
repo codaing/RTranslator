@@ -11,4 +11,4 @@ adb install --abi arm64-v8a --no-streaming seamless/build/outputs/apk/debug/seam
 adb install --no-streaming seamless/build/outputs/apk/androidTest/debug/seamless-debug-androidTest.apk
 adb shell am instrument -w -r nie.translator.seamless.test/androidx.test.runner.AndroidJUnitRunner | tee install-diagnostics/instrumentation.txt
 adb logcat -d -s LowBitProbe:I '*:S' > install-diagnostics/lowbit-probe.txt
-grep -E 'OK \(5 tests\)' install-diagnostics/instrumentation.txt
+grep -E 'OK \(6 tests\)' install-diagnostics/instrumentation.txt

@@ -18,6 +18,17 @@ model.ir_version = 9
 onnx.checker.check_model(model)
 onnx.save(model, out / "test-vocoder.onnx")
 
+# A 2-D MatMul graph exercises the Android XNNPACK execution provider.
+xnn_graph=h.make_graph([
+    h.make_node("MatMul",["x","weight"],["y"])],
+    "xnnpack_matmul",[h.make_tensor_value_info("x",T.FLOAT,[1,16])],
+    [h.make_tensor_value_info("y",T.FLOAT,[1,16])],
+    [numpy_helper.from_array(np.eye(16,dtype=np.float32)*2,name="weight")])
+xnn_model=h.make_model(xnn_graph,opset_imports=[h.make_opsetid("",17)])
+xnn_model.ir_version=9
+onnx.checker.check_model(xnn_model)
+onnx.save(xnn_model,out/"test-xnnpack-matmul.onnx")
+
 # Four-model deterministic integration fixture. These are tiny non-speech
 # graphs: they exercise the same file names, tensor interfaces, streaming
 # policy, external data and Java session chain as the real model pack.

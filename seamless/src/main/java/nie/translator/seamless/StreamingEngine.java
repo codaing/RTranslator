@@ -20,12 +20,19 @@ final class StreamingEngine implements AutoCloseable {
     private final List<Long> accepted=new ArrayList<>();
     private int durationStart=0, lastFrameCount=0, rollovers=0;
     private final boolean adaptive;
+    private final boolean xnnpackFp32Stages;
+    private final boolean nnapiEncoder;
     private final ContextBoundary boundary=new ContextBoundary();
     int contextFrames(){return frames.size();}
     int targetTokens(){return accepted.size()-tokens.prefix.length;}
     int rollovers(){return rollovers;}
     StreamingEngine(File dir,boolean adaptive)throws Exception{
+        this(dir,adaptive,false,false);
+    }
+    StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder)throws Exception{
         this.adaptive=adaptive;
+        this.xnnpackFp32Stages=xnnpackFp32Stages;
+        this.nnapiEncoder=nnapiEncoder;
         tokens=new TokenMetadata(new File(dir,"tokenizer.json"));
         for(long x:tokens.prefix)accepted.add(x);
         try{
@@ -48,6 +55,19 @@ final class StreamingEngine implements AutoCloseable {
                 o.setCPUArenaAllocator(false);
                 o.setMemoryPatternOptimization(false);
                 o.addConfigEntry("session.disable_prepacking","1");
+            }
+            if(name.equals("encoder.int8.onnx")&&nnapiEncoder){
+                // Experimental: Android NNAPI may claim supported encoder nodes;
+                // unsupported operators remain on the default CPU provider.
+                o.addNnapi();
+                android.util.Log.i("SeamlessModels","NNAPI requested for encoder");
+            }
+            if(xnnpackFp32Stages&&(name.equals("units.onnx")||name.equals("vocoder.onnx"))){
+                // XNNPACK owns its thread pool; avoid contention with ORT's pool.
+                o.setIntraOpNumThreads(1);
+                o.addConfigEntry("session.intra_op.allow_spinning","0");
+                o.addXnnpack(Collections.singletonMap("intra_op_num_threads","4"));
+                android.util.Log.i("SeamlessModels","XNNPACK requested for "+name);
             }
             long start=android.os.SystemClock.elapsedRealtime();
             OrtSession session=env.createSession(new File(dir,name).getAbsolutePath(),o);
