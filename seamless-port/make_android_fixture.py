@@ -134,6 +134,29 @@ with tempfile.TemporaryDirectory() as temp:
     with zipfile.ZipFile(out/"test-incremental-pack.zip","w") as z:
         for p in sorted(d.iterdir()):z.write(p,p.name)
 
+    # Use actual FP16 native projection results as decoder inputs. No Java
+    # conversion to float arrays; the graph consumes the tensor on every step.
+    (d/"sha256.json").unlink()
+    save(d,"decoder.source-projections.onnx",[
+        h.make_node("Cast",["encoded"],["projected"],to=T.FLOAT16)],
+        [vi("encoded",T.FLOAT,[1,"frames",80])],
+        [vi("projected",T.FLOAT16,[1,"frames",80])],[])
+    step=onnx.load(str(d/graph))
+    step.graph.input[1].CopyFrom(vi("projected",T.FLOAT16,[1,"frames",80]))
+    for node in step.graph.node:
+        if node.output[0]=="logits":node.output[0]="raw_logits"
+    step.graph.initializer.append(init("zero",0,np.float32))
+    step.graph.node.extend([
+        h.make_node("Cast",["projected"],["projected_float"],to=T.FLOAT),
+        h.make_node("ReduceSum",["projected_float"],["sum"],keepdims=0),
+        h.make_node("Mul",["sum","zero"],["zero_sum"]),
+        h.make_node("Add",["raw_logits","zero_sum"],["logits"])])
+    onnx.checker.check_model(step)
+    onnx.save(step,str(d/"decoder.cached-step.onnx"))
+    (d/"sha256.json").write_text(json.dumps({p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in d.iterdir()}))
+    with zipfile.ZipFile(out/"test-projected-pack.zip","w") as z:
+        for p in sorted(d.iterdir()):z.write(p,p.name)
+
 # Probe the actual Android ORT contrib operator with known packed weights.
 # Input K=32, N=2, block=16. Unsigned symmetric midpoint is 8 or 128.
 # Output columns have weights +0.25 and -0.5. No explicit zero points.

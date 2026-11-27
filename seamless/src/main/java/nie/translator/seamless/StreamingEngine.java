@@ -10,11 +10,11 @@ final class StreamingEngine implements AutoCloseable {
     interface Sink { void audio(float[] samples) throws Exception; }
     static final int MAX_FRAMES=6000, MIN_FRAMES=192, UPDATE_INTERVAL_FRAMES=64, MAX_TOKENS=100;
     private final OrtEnvironment env=OrtEnvironment.getEnvironment();
-    private OrtSession encoder,decoder,units;
+    private OrtSession encoder,decoder,units,projection;
     private EnglishUnitVocoder vocoder;
     private final TokenMetadata tokens;
     private DecoderCache.Layout cacheLayout;
-    String decoderMode(){return cacheLayout==null?"full-prefix-int8":"incremental-fp16-kv-cache";}
+    String decoderMode(){return projection!=null?"incremental-fp16-source-projections":cacheLayout==null?"full-prefix-int8":"incremental-fp16-kv-cache";}
     private final StreamingFbank fbank=new StreamingFbank();
     private final List<float[]> frames=new ArrayList<>();
     private final List<Long> accepted=new ArrayList<>();
@@ -44,8 +44,11 @@ final class StreamingEngine implements AutoCloseable {
             encoder=open(dir,"encoder.int8.onnx");
             if(ModelPack.incremental(dir)){
                 cacheLayout=new DecoderCache.Layout(dir);
-                decoder=open(dir,DecoderCache.GRAPH);
-                cacheLayout.check(decoder);
+                if(ModelPack.projected(dir)){
+                    projection=open(dir,DecoderCache.SOURCE);
+                    decoder=open(dir,DecoderCache.STEP);
+                }else decoder=open(dir,DecoderCache.GRAPH);
+                cacheLayout.check(decoder,projection);
             }else decoder=open(dir,"decoder.int8.onnx");
             units=open(dir,"units.onnx");
             vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath(),quietCpu);
@@ -112,6 +115,13 @@ final class StreamingEngine implements AutoCloseable {
         long started=System.nanoTime();
         try{return cache.step(ids);}finally{stats.add(phase,started,ids.length);}
     }
+    private OrtSession.Result project(float[][][] encoded)throws OrtException{
+        if(projection==null)return null;
+        long started=System.nanoTime();
+        try(OnnxTensor e=OnnxTensor.createTensor(env,encoded)){
+            return projection.run(Collections.singletonMap("encoded",e));
+        }finally{stats.add(StageStats.PROJECTION,started,encoded[0].length);}
+    }
     void push(short[] pcm,boolean finished,Sink sink)throws Exception{
         long fbankStart=System.nanoTime();
         boundary.observe(pcm);
@@ -132,7 +142,8 @@ final class StreamingEngine implements AutoCloseable {
         boolean eos=false;float eosProbability=0;
         // Cache is valid only for this encoder output. Native result tensors
         // are held until the next ORT call finishes, then closed.
-        try(DecoderCache cache=cacheLayout==null?null:new DecoderCache(env,decoder,cacheLayout,encoded)){
+        try(OrtSession.Result projected=project(encoded);
+            DecoderCache cache=cacheLayout==null?null:new DecoderCache(env,decoder,cacheLayout,encoded,projected)){
         Prediction p=cache==null?null:cachedStep(cache,prefix(false),StageStats.PREFILL);
         for(int i=0;i<50;i++){
             if(cache==null)p=predict(prefix(false),encoded,StageStats.PREFILL);
@@ -186,7 +197,7 @@ final class StreamingEngine implements AutoCloseable {
     }
     @Override public void close()throws Exception{
         Exception first=null;
-        for(AutoCloseable c:new AutoCloseable[]{vocoder,units,decoder,encoder})if(c!=null)try{c.close();}catch(Exception e){if(first==null)first=e;}
+        for(AutoCloseable c:new AutoCloseable[]{vocoder,units,decoder,projection,encoder})if(c!=null)try{c.close();}catch(Exception e){if(first==null)first=e;}
         if(first!=null)throw first;
     }
 }

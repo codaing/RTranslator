@@ -79,6 +79,17 @@ jobs:
           mkdir -p speech-reports
           cp models/speech-smoke.json speech-reports/original.json
           python -u seamless-port/compare_source_projections.py models speech-input/fbank.bin speech-reports
+      - name: Package only after same-run ARM64 parity and speed gate
+        run: |
+          python -c 'import json; assert json.load(open("speech-reports/comparison.json"))[-1]["eligible"] is True; assert json.load(open("models/speech-smoke.json"))["source_projections"] is True'
+          printf '\nAdditional modification: source-only cross-attention projection graph partition.\n' >> models/MODEL-LICENSE.txt
+          python seamless-port/model_pack.py pack models seamless-projected-fp16-experimental.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-projected-FP16-model-pack-EXPERIMENTAL
+          path: seamless-projected-fp16-experimental.zip
+          compression-level: 0
+          retention-days: 7
       - name: Upload memory and speed diagnostics
         if: always()
         uses: actions/upload-artifact@v4

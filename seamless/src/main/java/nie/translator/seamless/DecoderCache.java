@@ -9,6 +9,7 @@ import org.json.*;
 /** One source update owns its cache. Never reuse source-conditioned states across updates. */
 final class DecoderCache implements AutoCloseable {
     static final String GRAPH="decoder.incremental.fp16.onnx", META="decoder.incremental.meta.json";
+    static final String SOURCE="decoder.source-projections.onnx", STEP="decoder.cached-step.onnx";
     static final class Layout {
         final int heads,dim,layers;
         final String[] past,present;
@@ -31,8 +32,17 @@ final class DecoderCache implements AutoCloseable {
                     throw new IOException("invalid cache names");
             }
         }
-        void check(OrtSession s){
-            Set<String> in=new HashSet<>(Arrays.asList(past));in.addAll(Arrays.asList("tokens","encoded","position"));
+        void check(OrtSession s){check(s,null);}
+        void check(OrtSession s,OrtSession projection){
+            Set<String> in=new HashSet<>(Arrays.asList(past));in.addAll(Arrays.asList("tokens","position"));
+            if(projection==null)in.add("encoded");
+            else{
+                if(!projection.getInputNames().equals(Collections.singleton("encoded"))||
+                   projection.getOutputNames().isEmpty())throw new IllegalStateException("projection interface mismatch");
+                for(String name:projection.getOutputNames())
+                    if(!in.add(name))throw new IllegalStateException("projection input collision");
+                if(s.getInputNames().contains("encoded"))in.add("encoded");
+            }
             Set<String> out=new HashSet<>(Arrays.asList(present));out.addAll(Arrays.asList("logits","features","p_choose"));
             if(!in.equals(s.getInputNames())||!out.equals(s.getOutputNames()))
                 throw new IllegalStateException("incremental decoder interface mismatch");
@@ -43,23 +53,35 @@ final class DecoderCache implements AutoCloseable {
     private final Layout layout;
     private final OnnxTensor encoded;
     private final OnnxTensor empty;
+    private final Map<String,OnnxTensor> projected=new HashMap<>();
     private OrtSession.Result previous;
     private int position;
     private final List<float[]> features=new ArrayList<>();
     DecoderCache(OrtEnvironment env,OrtSession session,Layout layout,float[][][] source)throws OrtException{
+        this(env,session,layout,source,null);
+    }
+    DecoderCache(OrtEnvironment env,OrtSession session,Layout layout,float[][][] source,
+                 OrtSession.Result projections)throws OrtException{
         this.env=env;this.session=session;this.layout=layout;
-        encoded=OnnxTensor.createTensor(env,source);
+        if(projections!=null)for(Map.Entry<String,OnnxValue> entry:projections){
+            if(!(entry.getValue() instanceof OnnxTensor))throw new IllegalStateException("projection must be a tensor");
+            projected.put(entry.getKey(),(OnnxTensor)entry.getValue());
+        }
+        // Projection result is owned by the enclosing source update, not this cache.
+        encoded=session.getInputNames().contains("encoded")?OnnxTensor.createTensor(env,source):null;
         try{
             empty=OnnxTensor.createTensor(env,ByteBuffer.allocateDirect(0).order(ByteOrder.nativeOrder()).asFloatBuffer(),
                 new long[]{1,layout.heads,0,layout.dim});
-        }catch(OrtException|RuntimeException|OutOfMemoryError e){encoded.close();throw e;}
+        }catch(OrtException|RuntimeException|OutOfMemoryError e){if(encoded!=null)encoded.close();throw e;}
     }
     StreamingEngine.Prediction step(long[] ids)throws Exception{
         if(ids.length==0)throw new IllegalArgumentException("empty decoder step");
         Map<String,OnnxTensor> inputs=new HashMap<>();
         try(OnnxTensor t=OnnxTensor.createTensor(env,LongBuffer.wrap(ids),new long[]{1,ids.length});
             OnnxTensor p=OnnxTensor.createTensor(env,LongBuffer.wrap(new long[]{position}),new long[]{1})){
-            inputs.put("tokens",t);inputs.put("position",p);inputs.put("encoded",encoded);
+            inputs.put("tokens",t);inputs.put("position",p);
+            if(encoded!=null)inputs.put("encoded",encoded);
+            inputs.putAll(projected);
             for(int i=0;i<layout.past.length;i++){
                 OnnxTensor cache=previous==null?empty:(OnnxTensor)previous.get(layout.present[i]).orElseThrow();
                 inputs.put(layout.past[i],cache);
@@ -86,6 +108,6 @@ final class DecoderCache implements AutoCloseable {
     }
     float[][][] allFeatures(){return new float[][][]{features.toArray(new float[0][])};}
     @Override public void close(){
-        try{if(previous!=null)previous.close();}finally{try{empty.close();}finally{encoded.close();}}
+        try{if(previous!=null)previous.close();}finally{try{empty.close();}finally{if(encoded!=null)encoded.close();}}
     }
 }

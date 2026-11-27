@@ -10,11 +10,14 @@ final class ModelPack {
     static final String[] REQUIRED={"encoder.int8.onnx","units.onnx","vocoder.onnx","tokenizer.json"};
     private static boolean nonempty(File dir,String name){File f=new File(dir,name);return f.isFile()&&f.length()>0;}
     static boolean incremental(File dir){return nonempty(dir,DecoderCache.GRAPH);}
+    static boolean projected(File dir){return nonempty(dir,DecoderCache.SOURCE)&&nonempty(dir,DecoderCache.STEP);}
     static boolean present(File dir){
         if(!new File(dir,"sha256.json").isFile())return false;
         for(String f:REQUIRED)if(!new File(dir,f).isFile()||new File(dir,f).length()==0)return false;
         boolean legacy=nonempty(dir,"decoder.int8.onnx"),kv=incremental(dir);
         if(legacy==kv)return false; // reject ambiguous packages
+        boolean hasSource=new File(dir,DecoderCache.SOURCE).exists(),hasStep=new File(dir,DecoderCache.STEP).exists();
+        if((hasSource||hasStep)&&(!kv||!projected(dir)))return false;
         return legacy||nonempty(dir,DecoderCache.META);
     }
     static void clear(File dir)throws IOException{

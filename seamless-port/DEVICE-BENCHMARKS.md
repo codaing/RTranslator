@@ -34,3 +34,7 @@ Same 13.34 s recording; providers off. Normal vs quiet CPU: load 13.91/15.63 s; 
 | Close | 1.560 | 2.001 | | |
 
 Quiet CPU remains off. Encoder + prefill 68.1% of normal wall time. Even removing their entire time would leave 47.25 s (RTF ~3.54), so caching alone cannot meet real time. Retry source projection partition (previous missing shape /text_decoder/layers.0/encoder_decoder_attn/Transpose_1_output_0) with small external shape tensors materialized in metadata copy and source-only symbolic inference fallback. Native ARM64 same-run comparison now requires identical accepted tokens, decisions, duration, waveform NRMS <=2%, and improved processing RTF. No Android integration before passing. No independent TTS, no fixed utterance cuts. Existing package unchanged.
+
+## Native ARM64 projection cache (not a phone benchmark)
+
+Run 46082615070, commit 47fe2eb: 144 source-only MatMul/Gemm operations, 72 projection boundaries. Processing RTF 3.228079 -> 2.918371 (9.6% lower); accepted tokens, prefill decisions, duration identical; PCM NRMS 0.0. One synthetic Mandarin speech fixture, one pair of measurements. Candidate peak RSS 4224.85 MiB. Do not infer Android speed or general translation quality. Optional Android projected model pack shares external decoder weights and keeps native projection results alive only within each source update; legacy packages remain supported. Android fixture and separate host-gated package must pass before physical device testing.

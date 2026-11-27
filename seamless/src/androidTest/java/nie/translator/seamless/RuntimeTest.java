@@ -57,6 +57,9 @@ public class RuntimeTest {
     @Test public void quietCpuCachedDecoderPreservesSyntheticAudio() throws Exception {
         chain("test-incremental-pack.zip",true,true);
     }
+    @Test public void projectedDecoderReusesNativeFp16Tensors() throws Exception {
+        chain("test-projected-pack.zip",true,false);
+    }
     private void chain(String pack,boolean cached,boolean quiet)throws Exception{
         // Synthetic graphs validate application wiring, not translation quality.
         android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
@@ -70,7 +73,9 @@ public class RuntimeTest {
             assertTrue(new File(dir,"encoder.int8.onnx.weights").isFile());
             java.util.List<float[]> output=new java.util.ArrayList<>();
             try(StreamingEngine engine=new StreamingEngine(dir,false,false,false,quiet)){
-                assertEquals(cached?"incremental-fp16-kv-cache":"full-prefix-int8",engine.decoderMode());
+                boolean projected=pack.equals("test-projected-pack.zip");
+                assertEquals(projected,ModelPack.projected(dir));
+                assertEquals(projected?"incremental-fp16-source-projections":cached?"incremental-fp16-kv-cache":"full-prefix-int8",engine.decoderMode());
                 short[] pcm=new short[5120];
                 for(int i=0;i<6;i++)engine.push(pcm,false,output::add);
                 assertTrue("must wait for minimum context",output.isEmpty());
@@ -88,6 +93,7 @@ public class RuntimeTest {
                 assertTrue(engine.stats.calls(StageStats.UNITS)>0);
                 assertEquals(1,engine.stats.calls(StageStats.VOCODER));
                 if(cached)assertTrue(engine.stats.calls(StageStats.STEP)>0);
+                if(projected)assertEquals(engine.stats.calls(StageStats.ENCODER),engine.stats.calls(StageStats.PROJECTION));
             }
         } finally {ModelPack.clear(parent);}
     }
