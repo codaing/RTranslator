@@ -28,7 +28,7 @@ def fix_mixed_mul_types(graph,inherited=None):
         dtypes[tensor.name]=tensor.data_type
         shapes[tensor.name]=list(tensor.dims)
     patched=0;new_nodes=[]
-    binary_float_ops={"Add","Sub","Mul","Div","Pow"}
+    binary_float_ops={"Add","Sub","Mul","Div","Pow","MatMul","Gemm"}
     for node in graph.node:
         # Infer nested subgraph input types from values already seen in the parent.
         for attr in node.attribute:
