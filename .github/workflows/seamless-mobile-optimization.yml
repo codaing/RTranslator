@@ -68,6 +68,7 @@ jobs:
         run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
       - name: Run full-prefix speech benchmark at selected cadence
         run: |
+          set -o pipefail
           mkdir -p speech-reports
           python -u seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav --update-frames "$UPDATE_FRAMES" 2>&1 | tee speech-reports/smoke.log
           cat models/speech-smoke.json

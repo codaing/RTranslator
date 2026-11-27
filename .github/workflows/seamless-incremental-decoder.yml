@@ -31,6 +31,7 @@ jobs:
           python -m pip install -e /tmp/meta-seamless 'onnx==1.16.2' 'onnxruntime==1.18.1'
       - name: Export one-graph KV cache and compare every token to full-prefix reference
         run: |
+          set -o pipefail
           mkdir -p model-check
           python -u seamless-port/incremental_decoder.py model-check 2>&1 | tee model-check/incremental-fp32.log
           test -s model-check/decoder.incremental.fp32.validated.json
@@ -41,7 +42,9 @@ jobs:
         run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
       - name: Quantize and validate incremental cache graph
         id: validate
-        run: python -u seamless-port/validate_incremental_int8.py model-check 2>&1 | tee model-check/incremental-int8.log
+        run: |
+          set -o pipefail
+          python -u seamless-port/validate_incremental_int8.py model-check 2>&1 | tee model-check/incremental-int8.log
       - name: Upload incremental parity reports
         if: always()
         uses: actions/upload-artifact@v4

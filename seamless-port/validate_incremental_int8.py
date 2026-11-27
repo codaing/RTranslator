@@ -5,7 +5,6 @@ import time
 import numpy as np
 import onnx
 import onnxruntime as ort
-from quantize_int8 import select_nodes
 from weight_only_int8 import convert
 from decoder_session import configure_native
 
@@ -25,10 +24,23 @@ def main(directory):
     baseline=json.loads((directory/"decoder.incremental.fp32.validated.json").read_text())
     if baseline.get("parity")!="PASS":raise RuntimeError("FP32 incremental parity gate missing")
     graph=onnx.load(str(source),load_external_data=False)
-    entries=select_nodes(graph.graph,"decoder")
-    matmuls={n.name for n in graph.graph.node if n.op_type=="MatMul"}
-    selected=[e["name"] for e in entries if e["selected"] and e["name"] in matmuls and e["shape"][0]%16==0]
-    if len(selected)!=48:raise RuntimeError(f"expected 48 eligible FFN MatMuls, found {len(selected)}: {selected[:8]}")
+    initializers={t.name:t for t in graph.graph.initializer}
+    selected=[];shape_counts={}
+    for node in graph.graph.node:
+        if node.op_type!="MatMul" or len(node.input)<2 or node.input[1] not in initializers:
+            continue
+        weight=initializers[node.input[1]]
+        shape=tuple(int(x) for x in weight.dims)
+        shape_counts[str(shape)]=shape_counts.get(str(shape),0)+1
+        # In this decoder the FFN inner/output matrices are the only non-square
+        # medium-width matrices. Attention projections are 1024x1024; vocab
+        # projection is much wider. Match by tensor shape because this export
+        # route does not preserve fairseq2 module path names on MatMul nodes.
+        if len(shape)==2 and shape[0]!=shape[1] and min(shape)>=512 and max(shape)<=16384 and all(x%16==0 for x in shape):
+            selected.append(node.name)
+    if len(selected)!=48:
+        raise RuntimeError(f"expected 48 FFN MatMuls, found {len(selected)}; weight shapes={shape_counts}")
+    print(f"Selected {len(selected)} FFN matrices; shape counts={shape_counts}",flush=True)
     del graph
     start=time.monotonic()
     convert(source,output,selected,group=16,native=True,asymmetric=True,bits=8)
