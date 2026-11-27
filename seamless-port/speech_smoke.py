@@ -53,7 +53,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64):
+def run(directory,fbank,out,update_frames=64,session_profile='default'):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -64,9 +64,14 @@ def run(directory,fbank,out,update_frames=64):
     decoder_name=incremental_path.name if incremental else "decoder.int8.onnx"
     decoder_meta=json.loads((directory/"decoder.incremental.meta.json").read_text()) if incremental else None
     start=time.monotonic()
-    from decoder_session import configure_native
+    from decoder_session import configure_native,configure_fp16
     decoder_opts=ort.SessionOptions();decoder_opts.intra_op_num_threads=4;decoder_opts.inter_op_num_threads=1
-    if not incremental:configure_native(decoder_opts)
+    if incremental:
+        configure_fp16(decoder_opts,session_profile)
+        configure_fp16(opts,session_profile)
+    else:
+        if session_profile!='default':raise ValueError('profile applies only to incremental model')
+        configure_native(decoder_opts)
     sessions=[]
     from quantize_int8 import rss_mib
     specs=[("encoder.int8.onnx",opts),(decoder_name,decoder_opts),("units.onnx",opts),("vocoder.onnx",opts)]
@@ -173,6 +178,7 @@ def run(directory,fbank,out,update_frames=64):
     result={"result":"PASS" if success else "FAIL",
        "scope":"host waveform smoke only, not translation quality or Android speed",
        "decoder_mode":"incremental-fp16-kv-cache" if incremental else "full-prefix-int8",
+       "session_profile":session_profile,
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
@@ -185,4 +191,5 @@ def run(directory,fbank,out,update_frames=64):
 if __name__=="__main__":
     p=argparse.ArgumentParser();p.add_argument("directory");p.add_argument("features");p.add_argument("output")
     p.add_argument("--update-frames",type=int,default=64)
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames)
+    p.add_argument("--session-profile",choices=("default","no-retention","basic-no-retention"),default="default")
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile)

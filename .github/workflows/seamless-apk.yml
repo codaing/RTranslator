@@ -42,15 +42,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p install-diagnostics
-          for attempt in 1 2 3; do
-            if bash ./gradlew -PseamlessOnly :seamless:testDebugUnitTest :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "install-diagnostics/gradle-$attempt.txt"; then
+          for attempt in 1 2 3 4; do
+            if bash ./gradlew -PseamlessOnly :seamless:testDebugUnitTest :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon --max-workers=2 2>&1 | tee "install-diagnostics/gradle-$attempt.txt"; then
               exit 0
             fi
-            if [[ "$attempt" == 3 ]] || ! grep -Eq 'Received status code 429|Too Many Requests|Received status code 503' "install-diagnostics/gradle-$attempt.txt"; then
+            if [[ "$attempt" == 4 ]] || ! grep -Eq 'Received status code 429|Too Many Requests|Received status code 503' "install-diagnostics/gradle-$attempt.txt"; then
               exit 1
             fi
             echo "Transient dependency server failure, retrying"
-            sleep $((30 * attempt))
+            sleep $((60 * attempt))
           done
       - name: Verify APK and native library packaging
         run: |
