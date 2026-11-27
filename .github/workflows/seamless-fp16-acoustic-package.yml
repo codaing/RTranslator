@@ -5,34 +5,19 @@ on:
     paths:
       - '.github/workflows/seamless-fp16-acoustic-package.yml'
   workflow_dispatch:
-    inputs:
-      baseline_run_id:
-        description: 'Validated INT8 four-model package run'
-        type: string
-        default: '45956345415'
-      fp16_run_id:
-        description: 'Successful FP16 acoustic candidate run'
-        type: string
-        default: '45992690814'
-      update_frames:
-        description: 'Inference cadence in 10 ms frames'
-        type: choice
-        options: ['32','64','96']
-        default: '64'
 permissions:
   contents: read
   actions: read
 concurrency:
   group: fp16-acoustic-package-${{ github.ref }}
   cancel-in-progress: true
-env:
-  BASELINE_RUN_ID: ${{ inputs.baseline_run_id || '45956345415' }}
-  FP16_RUN_ID: ${{ inputs.fp16_run_id || '45992690814' }}
-  UPDATE_FRAMES: ${{ inputs.update_frames || '64' }}
 jobs:
   package-and-smoke:
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-22.04
+    env:
+      BASELINE_RUN_ID: '45956345415'
+      FP16_RUN_ID: '45992690814'
+      UPDATE_FRAMES: '64'
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
