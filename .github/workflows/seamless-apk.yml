@@ -2,6 +2,17 @@ name: Build minimal Seamless port and runtime test
 on:
   push:
     branches: [seamless-streaming]
+    paths:
+      - 'seamless/**'
+      - 'seamless-port/make_android_fixture.py'
+      - 'seamless-port/android_test.sh'
+      - 'seamless-port/check_native.py'
+      - '.github/workflows/seamless-apk.yml'
+      - 'build.gradle'
+      - 'settings.gradle'
+      - 'gradle.properties'
+      - 'gradlew'
+      - 'gradle/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,7 +39,19 @@ jobs:
           python -m pip install 'numpy<2' 'onnx==1.16.2'
           python seamless-port/make_android_fixture.py
       - name: Build minimal APK and instrumentation tests
-        run: bash ./gradlew -PseamlessOnly :seamless:testDebugUnitTest :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
+        shell: bash
+        run: |
+          mkdir -p install-diagnostics
+          for attempt in 1 2 3; do
+            if bash ./gradlew -PseamlessOnly :seamless:testDebugUnitTest :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon 2>&1 | tee "install-diagnostics/gradle-$attempt.txt"; then
+              exit 0
+            fi
+            if [[ "$attempt" == 3 ]] || ! grep -Eq 'Received status code 429|Too Many Requests|Received status code 503' "install-diagnostics/gradle-$attempt.txt"; then
+              exit 1
+            fi
+            echo "Transient dependency server failure, retrying"
+            sleep $((30 * attempt))
+          done
       - name: Verify APK and native library packaging
         run: |
           mkdir -p install-diagnostics
