@@ -1,1 +1,5 @@
-include ':app', ':seamless'
+// Skip all legacy Android/NDK configuration when building the standalone port.
+if (!gradle.startParameter.projectProperties.containsKey('seamlessOnly')) {
+    include ':app'
+}
+include ':seamless'

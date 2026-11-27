@@ -21,11 +21,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Install tools and create test fixture
         run: |
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          set -o pipefail
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "build-tools;34.0.0"
           python -m pip install 'numpy<2' 'onnx==1.16.2'
           python seamless-port/make_android_fixture.py
       - name: Build minimal APK and instrumentation tests
-        run: bash ./gradlew :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
+        run: bash ./gradlew -PseamlessOnly :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
       - name: Verify APK and native library packaging
         run: |
           mkdir -p install-diagnostics

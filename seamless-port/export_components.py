@@ -101,6 +101,13 @@ def main():
 
     wrapper.eval()
     with torch.inference_mode():
+        # Capture unmodified reference outputs before applying export-only rewrites.
+        references = [wrapper(*inputs) for inputs in examples]
+        if args.component == "encoder":
+            from shaw_export import patch_shaw_attention
+            patch_shaw_attention(model)
+            for inputs, expected in zip(examples, references):
+                torch.testing.assert_close(wrapper(*inputs), expected, rtol=0.002, atol=0.0002)
         torch.onnx.export(wrapper, examples[0], str(model_path), input_names=names,
                           output_names=outputs, dynamic_axes=axes, opset_version=17,
                           do_constant_folding=True)
@@ -108,7 +115,7 @@ def main():
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         results = []
         for case, inputs in enumerate(examples):
-            expected = wrapper(*inputs)
+            expected = references[case]
             if isinstance(expected, torch.Tensor):
                 expected = (expected,)
             start = time.monotonic()
