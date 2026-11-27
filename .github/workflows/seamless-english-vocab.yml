@@ -1,0 +1,97 @@
+name: English-only vocabulary pruning experiment
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-english-vocab.yml'
+      - 'seamless-port/prune_english_vocab.py'
+      - 'seamless-port/select_english_vocab.py'
+      - 'seamless-port/compare_english_vocab.py'
+      - 'seamless-port/test_english_vocab.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: english-vocab-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-and-smoke:
+    runs-on: ubuntu-22.04
+    env:
+      BASELINE_RUN_ID: '46002703236'
+      UPDATE_FRAMES: '64'
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the previously validated four-model INT8 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-model-pack
+          path: base-artifact
+          run-id: ${{ env.BASELINE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Extract base package and free the outer artifact archive
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-incremental-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Prepare Mandarin source and Java filterbanks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install 'numpy<2' 'torch==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless
+          python -u seamless-port/select_english_vocab.py models --budget 48000
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          python seamless-port/check_fbank.py speech-input/mandarin.pcm speech-input/fbank.bin fbank-check.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android-matching ONNX Runtime
+        run: python -m pip install 'numpy<2' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+      - name: Test vocabulary selection and tied embedding rewrite
+        run: python -m unittest discover -s seamless-port -p test_english_vocab.py
+      - name: Compact real decoder without changing original token IDs
+        run: |
+          mkdir -p speech-reports
+          python -u seamless-port/prune_english_vocab.py models english-models
+          cp english-models/english-vocab-conversion.json speech-reports/
+      - name: Compare same-run real Mandarin speech with full vocabulary
+        run: python -u seamless-port/compare_english_vocab.py models english-models speech-input/fbank.bin speech-reports
+      - name: Upload vocabulary experiment diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-English-vocabulary-report
+          path: speech-reports/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload passing compact decoder candidate
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-English-vocabulary-decoder-experimental
+          path: |
+            english-models/decoder.incremental.fp16.onnx
+            english-models/decoder.english.weights
+            english-models/english-vocab*.json
+          compression-level: 0
+          retention-days: 3
