@@ -36,7 +36,17 @@ final class StreamingEngine implements AutoCloseable {
     private OrtSession open(File dir,String name)throws OrtException{
         try(OrtSession.SessionOptions o=new OrtSession.SessionOptions()){
             o.setIntraOpNumThreads(4);o.setInterOpNumThreads(1);
-            return env.createSession(new File(dir,name).getAbsolutePath(),o);
+            if(name.equals("decoder.int8.onnx")){
+                // Match the validated native INT8 host session; avoid a second
+                // packed-weight copy and allocator high-water retention.
+                o.setCPUArenaAllocator(false);
+                o.setMemoryPatternOptimization(false);
+                o.addConfigEntry("session.disable_prepacking","1");
+            }
+            long start=android.os.SystemClock.elapsedRealtime();
+            OrtSession session=env.createSession(new File(dir,name).getAbsolutePath(),o);
+            android.util.Log.i("SeamlessModels","loaded "+name+" in "+(android.os.SystemClock.elapsedRealtime()-start)+" ms, PSS="+android.os.Debug.getPss()+" KiB");
+            return session;
         }
     }
     private long[] prefix(boolean comma){

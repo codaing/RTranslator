@@ -35,6 +35,11 @@ jobs:
           python -u seamless-port/export_units.py model-check 2>&1 | tee model-check/export.log
       - name: Create independent reference fixtures
         run: python -u seamless-port/units_quant_experiment.py fixtures model-check 2>&1 | tee model-check/fixtures.log
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime matching Android
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
       - name: Quantize and compare durations and units
         run: python -u seamless-port/units_quant_experiment.py evaluate model-check 2>&1 | tee model-check/int8.log
       - name: Require explicit acoustic-unit parity PASS

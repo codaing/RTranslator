@@ -1,4 +1,4 @@
-"""Independent acoustic-unit decoder dynamic INT8 experiment; never stages a pack."""
+"""Independent post-duration native INT8 experiment; never stages a pack."""
 import argparse
 import json
 import math
@@ -8,9 +8,10 @@ import time
 import numpy as np
 import onnx
 import onnxruntime as ort
-from onnxruntime.quantization import quantize_dynamic,QuantType
+from weight_only_int8 import convert
 from fold_weights import prepare
 from quantize_int8 import phase,rss_mib
+from decoder_session import configure_native
 
 def make_fixtures(directory):
     # Use the same pinned checkpoint and frontend, but independently generated
@@ -44,6 +45,34 @@ def graph_bytes(path):
             if e.key=="location":files.add(path.parent/e.value)
     return sum(f.stat().st_size for f in files)
 
+def select_post_duration(graph):
+    """Actual exported UnitY2 decoder has attention, not FFN MatMuls."""
+    import re
+    weights={t.name:t for t in graph.initializer}
+    selected=[]
+    for n in graph.node:
+        if n.op_type!="MatMul" or len(n.input)!=2 or n.input[1] not in weights:
+            continue
+        w=weights[n.input[1]]
+        if w.data_type!=onnx.TensorProto.FLOAT or len(w.dims)!=2 or w.dims[0]%16:
+            continue
+        if re.fullmatch(r"/decoder/layers\.\d+/self_attn/(?:q_proj|k_proj|v_proj|output_proj)/MatMul",n.name):
+            selected.append(n.name)
+    # Verify by backward traversal that no selected projection contributes
+    # to the duration output, independent of exported module names.
+    producers={o:n for n in graph.node for o in n.output}
+    todo=["durations"];seen=set();ancestors=set()
+    while todo:
+        value=todo.pop()
+        if value in seen:continue
+        seen.add(value)
+        n=producers.get(value)
+        if n is not None:
+            ancestors.add(n.name);todo.extend(n.input)
+    if ancestors.intersection(selected):raise RuntimeError("selection affects duration prediction")
+    return selected
+
+
 def evaluate(directory):
     source=directory/"units.onnx"; output=directory/"units.int8.onnx"
     report=directory/"units-int8-experiment.json"
@@ -53,7 +82,7 @@ def evaluate(directory):
     fixtures=sorted(directory.glob("units.extra*.npz"))
     if len(fixtures)!=5:raise ValueError("expected five reference fixtures")
     opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
-    results={"component":"units","precision":"int8-dynamic","parity":"PENDING","fp32_bytes":graph_bytes(source),"tests":[]}
+    results={"component":"units","precision":"int8-native-experimental","parity":"PENDING","fp32_bytes":graph_bytes(source),"tests":[]}
     def save():report.write_text(json.dumps(results,indent=2)+"\n")
     save()
     # Check that independent reference inputs are valid for the FP32 ONNX
@@ -67,31 +96,24 @@ def evaluate(directory):
                 np.testing.assert_allclose(logits,f["logits"],rtol=0.02,atol=0.002)
                 np.testing.assert_array_equal(logits.argmax(-1),f["logits"].argmax(-1))
         del session
-    with phase("units selective post-duration INT8 quantization"):
+    with phase("units native post-duration INT8 quantization"):
         folded=prepare(source)
         graph=onnx.load(str(folded),load_external_data=False).graph
-        initializers={t.name for t in graph.initializer}
-        # Quantize only post-duration acoustic decoder FFNs, not encoder,
-        # character upsampler, duration predictor, attention or final projection.
-        import re
-        selected=[n.name for n in graph.node if n.op_type in ("MatMul","Gemm") and len(n.input)>1
-                  and n.input[1] in initializers and re.search(r"(?:^|/)decoder/(?:layers[^/]*)/.*(?:^|/)ffn/(?:inner_proj|output_proj)(?:/|$)",n.name)
-                  and "decoder_frontend" not in n.name]
-        results["policy"]="post-duration-decoder-ffn-only"
+        selected=select_post_duration(graph)
+        results["policy"]="post-duration-attention-native8-asymmetric-group16"
         results["selected_nodes"]=selected
         results["available_matrix_names"]=[n.name for n in graph.node if n.op_type in ("MatMul","Gemm")]
         save()
-        if not selected:raise RuntimeError("No eligible post-duration acoustic FFN nodes identified")
+        if len(selected)!=24:raise RuntimeError(f"expected 24 post-duration attention projections, got {len(selected)}")
         del graph
-        quantize_dynamic(str(folded),str(output),weight_type=QuantType.QInt8,per_channel=True,
-                         op_types_to_quantize=["MatMul","Gemm"],nodes_to_quantize=selected,
-                         extra_options={"MatMulConstBOnly":True},use_external_data_format=True)
+        convert(folded,output,selected,group=16,native=True,asymmetric=True)
     onnx.checker.check_model(str(output))
     g=onnx.load(str(output),load_external_data=False)
-    results["quantized_ops"]=sum(n.op_type in ("MatMulInteger","QLinearMatMul","DynamicQuantizeMatMul","QGemm") for n in g.graph.node)
-    if not results["quantized_ops"]:raise RuntimeError("no integer weight operations")
+    results["quantized_ops"]=sum(n.op_type=="MatMulNBits" and n.domain=="com.microsoft" for n in g.graph.node)
+    if results["quantized_ops"]!=len(selected):raise RuntimeError("native operator count mismatch")
     results["int8_bytes"]=graph_bytes(output)
     save();del g
+    configure_native(opts)
     with phase("INT8 session load"):
         session=ort.InferenceSession(str(output),sess_options=opts,providers=["CPUExecutionProvider"])
     results["session_rss_mib"]=rss_mib()
