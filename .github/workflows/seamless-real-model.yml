@@ -7,6 +7,8 @@ on:
       - 'seamless-port/shaw_export.py'
       - 'seamless-port/sdpa_export.py'
       - 'seamless-port/inspect_encoder.py'
+      - 'seamless-port/repair_encoder_graph.py'
+      - 'seamless-port/test_repair_encoder_graph.py'
       - 'seamless-port/shaw_regression.py'
       - 'seamless-port/quantize_int8.py'
       - '.github/workflows/seamless-real-model.yml'
@@ -39,7 +41,9 @@ jobs:
           python -c 'import torch, fairseq2; print(torch.__version__, fairseq2.__version__)'
       - name: Check dynamic Shaw attention without checkpoint
         if: matrix.component == 'encoder'
-        run: python seamless-port/shaw_regression.py
+        run: |
+          python seamless-port/shaw_regression.py
+          python -m unittest discover -s seamless-port -p test_repair_encoder_graph.py
       - name: Export actual checkpoint and compare with PyTorch
         shell: bash
         run: |

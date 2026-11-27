@@ -113,6 +113,9 @@ def main():
         torch.onnx.export(wrapper, examples[0], str(model_path), input_names=names,
                           output_names=outputs, dynamic_axes=axes, opset_version=17,
                           do_constant_folding=args.component != "encoder")
+        if args.component == "encoder":
+            from repair_encoder_graph import repair
+            repair(model_path)
         onnx.checker.check_model(str(model_path))
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         results = []
