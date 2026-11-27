@@ -13,6 +13,58 @@ def nrms(actual,expected):
     return float(np.sqrt(np.mean((a-e)**2))/max(float(np.sqrt(np.mean(e**2))),1e-6))
 
 
+
+
+def fix_mixed_mul_types(graph,inherited=None):
+    """Insert explicit FP32->FP16 casts on mixed-type Mul inputs in nested graphs."""
+    dtypes=dict(inherited or {})
+    shapes={}
+    for vi in list(graph.input)+list(graph.value_info)+list(graph.output):
+        tt=vi.type.tensor_type
+        if tt.elem_type:
+            dtypes[vi.name]=tt.elem_type
+            shapes[vi.name]=[d.dim_value if d.HasField("dim_value") else None for d in tt.shape.dim] if tt.HasField("shape") else None
+    for tensor in graph.initializer:
+        dtypes[tensor.name]=tensor.data_type;shapes[tensor.name]=list(tensor.dims)
+    patched=0;new_nodes=[]
+    for node in graph.node:
+        for attr in node.attribute:
+            if attr.type==onnx.AttributeProto.GRAPH:
+                patched+=fix_mixed_mul_types(attr.g,dtypes)
+            elif attr.type==onnx.AttributeProto.GRAPHS:
+                for subgraph in attr.graphs:patched+=fix_mixed_mul_types(subgraph,dtypes)
+        if node.op_type=="Constant":
+            for attr in node.attribute:
+                if attr.name=="value" and attr.type==onnx.AttributeProto.TENSOR:
+                    dtypes[node.output[0]]=attr.t.data_type;shapes[node.output[0]]=list(attr.t.dims)
+        casts=[]
+        if node.op_type=="Mul":
+            known=[dtypes.get(name) for name in node.input]
+            if onnx.TensorProto.FLOAT in known and onnx.TensorProto.FLOAT16 in known:
+                for index,dtype in enumerate(known):
+                    if dtype==onnx.TensorProto.FLOAT:
+                        original=node.input[index]
+                        cast_out=f"{original}__to_fp16_for_mul_{patched}"
+                        cast_name=f"cast_fp16_for_mul_{patched}"
+                        casts.append(onnx.helper.make_node("Cast",[original],[cast_out],to=onnx.TensorProto.FLOAT16,name=cast_name))
+                        dtypes[cast_out]=onnx.TensorProto.FLOAT16;shapes[cast_out]=shapes.get(original)
+                        vi=onnx.helper.make_tensor_value_info(cast_out,onnx.TensorProto.FLOAT16,shapes.get(original))
+                        graph.value_info.append(vi)
+                        node.input[index]=cast_out;patched+=1
+                if node.output:
+                    dtypes[node.output[0]]=onnx.TensorProto.FLOAT16
+                    for vi in graph.value_info:
+                        if vi.name==node.output[0]:vi.type.tensor_type.elem_type=onnx.TensorProto.FLOAT16
+        new_nodes.extend(casts);new_nodes.append(node)
+        if node.op_type=="Cast":
+            to=next((a.i for a in node.attribute if a.name=="to"),None)
+            if to is not None and node.output:dtypes[node.output[0]]=to
+        elif node.op_type in ("Add","Sub","Mul","Div","Pow") and node.output:
+            types=[dtypes.get(n) for n in node.input if n in dtypes]
+            if types and len(set(types))==1:dtypes[node.output[0]]=types[0]
+    graph.ClearField("node");graph.node.extend(new_nodes)
+    return patched
+
 def main(component,directory):
     if component not in ("units","vocoder"):raise ValueError("FP16 experiment is only for units/vocoder")
     directory=Path(directory);source=directory/f"{component}.onnx"
@@ -52,6 +104,7 @@ def main(component,directory):
             location=output.name+".weights",size_threshold=1024)
         onnx.checker.check_model(str(output))
         result["conversion_seconds"]=time.monotonic()-start
+        result["mixed_mul_casts"]=fix_mixed_mul_types(model.graph)
         weights=directory/(output.name+".weights")
         result["fp16_bytes"]=output.stat().st_size+(weights.stat().st_size if weights.exists() else 0)
         options=ort.SessionOptions();options.intra_op_num_threads=4;options.inter_op_num_threads=1
