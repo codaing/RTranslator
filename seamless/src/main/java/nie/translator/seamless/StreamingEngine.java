@@ -16,8 +16,14 @@ final class StreamingEngine implements AutoCloseable {
     private final StreamingFbank fbank=new StreamingFbank();
     private final List<float[]> frames=new ArrayList<>();
     private final List<Long> accepted=new ArrayList<>();
-    private int durationStart=0, lastFrameCount=0;
-    StreamingEngine(File dir)throws Exception{
+    private int durationStart=0, lastFrameCount=0, rollovers=0;
+    private final boolean adaptive;
+    private final ContextBoundary boundary=new ContextBoundary();
+    int contextFrames(){return frames.size();}
+    int targetTokens(){return accepted.size()-tokens.prefix.length;}
+    int rollovers(){return rollovers;}
+    StreamingEngine(File dir,boolean adaptive)throws Exception{
+        this.adaptive=adaptive;
         tokens=new TokenMetadata(new File(dir,"tokenizer.json"));
         for(long x:tokens.prefix)accepted.add(x);
         try{
@@ -59,6 +65,7 @@ final class StreamingEngine implements AutoCloseable {
         }
     }
     void push(short[] pcm,boolean finished,Sink sink)throws Exception{
+        boundary.observe(pcm);
         frames.addAll(fbank.push(pcm));
         if(frames.size()>MAX_FRAMES)throw new IllegalStateException("60-second experimental context limit reached; no audio silently discarded");
         int count=frames.size()&~1;
@@ -70,17 +77,30 @@ final class StreamingEngine implements AutoCloseable {
             encoded=(float[][][])value(r,"encoded");
         }
         int oldSize=accepted.size();
+        boolean eos=false;float eosProbability=0;
         for(int i=0;i<50;i++){
             Prediction p=predict(prefix(false),encoded);
+            if(p.token==tokens.eos){eos=true;eosProbability=p.p;break;}
             if(!StreamingPolicy.write(p.p,p.token,tokens.eos,finished))break;
             if(accepted.size()-tokens.prefix.length>=MAX_TOKENS)
                 throw new IllegalStateException("100-token experimental context limit reached");
             accepted.add((long)p.token);
         }
-        if(accepted.size()-tokens.prefix.length<2||(!finished&&oldSize==accepted.size()))return;
+        boolean rollover=!finished&&boundary.candidate(adaptive,count,targetTokens(),eos,eosProbability);
+        if(targetTokens()<2||(!finished&&!rollover&&oldSize==accepted.size()))return;
+        boolean flushed=synthesize(encoded,finished||rollover,sink);
+        // This is an experimental EOS + quiet boundary heuristic, not proof
+        // of source coverage. Reset only after successful output handoff.
+        if(rollover&&flushed){
+            frames.subList(0,count).clear(); // keep any unencoded odd frame
+            accepted.clear();for(long x:tokens.prefix)accepted.add(x);
+            durationStart=0;lastFrameCount=0;boundary.reset();rollovers++;
+        }
+    }
+    private boolean synthesize(float[][][] encoded,boolean flush,Sink sink)throws Exception{
         long[] t=prefix(true);
         TokenMetadata.Mapping m=tokens.map(t);
-        if(m.chars.length==0)return;
+        if(m.chars.length==0)return false;
         Prediction p=predict(t,encoded);
         if(p.features[0].length!=t.length)throw new IllegalStateException("decoder feature alignment");
         try(OnnxTensor f=OnnxTensor.createTensor(env,p.features);OnnxTensor ch=longs(m.chars);
@@ -88,12 +108,14 @@ final class StreamingEngine implements AutoCloseable {
             long[] d=((long[][])value(r,"durations"))[0];
             if(durationStart>d.length)throw new IllegalStateException("duration prefix shrank");
             int total=StreamingPolicy.offset(d,d.length),start=StreamingPolicy.offset(d,durationStart);
-            if(total-start<(finished?1:50))return;
+            if(total-start==0)return flush;
+            if(total-start<(flush?1:50))return false;
             long[] u=StreamingPolicy.units(((float[][][])value(r,"logits"))[0],d,durationStart);
             float[] waveform=vocoder.decode(u);
             if(waveform.length==0)throw new IllegalStateException("empty synthesized output");
-            durationStart=Math.max(0,d.length-1);
             sink.audio(waveform);
+            durationStart=flush?d.length:Math.max(0,d.length-1);
+            return true;
         }
     }
     @Override public void close()throws Exception{

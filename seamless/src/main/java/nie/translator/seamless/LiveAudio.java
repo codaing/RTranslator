@@ -1,6 +1,10 @@
 package nie.translator.seamless;
 
 import android.media.*;
+import android.os.Debug;
+import android.os.SystemClock;
+import java.util.Locale;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.Arrays;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicReference;
@@ -14,6 +18,8 @@ final class LiveAudio implements AutoCloseable {
     private final BlockingQueue<float[]> output=new ArrayBlockingQueue<>(8);
     private final AtomicReference<Throwable> error=new AtomicReference<>();
     private volatile boolean running=true, captureDone=false, inferenceDone=false;
+    private final AtomicLong captured=new AtomicLong(),processed=new AtomicLong(),generated=new AtomicLong(),submitted=new AtomicLong();
+    private long startMs,computeMs,firstAudioMs=-1,lastStepMs,lastReportMs;
     private volatile AudioRecord record;
     private volatile AudioTrack track;
     LiveAudio(AudioManager manager,Status status){this.manager=manager;this.status=status;}
@@ -40,6 +46,7 @@ final class LiveAudio implements AutoCloseable {
                     short[] pcm=new short[5120];int n=record.read(pcm,0,pcm.length,AudioRecord.READ_BLOCKING);
                     if(!running)break;
                     if(n<=0)throw new IllegalStateException("microphone read "+n);
+                    captured.addAndGet(n);
                     if(!input.offer(n==pcm.length?pcm:Arrays.copyOf(pcm,n)))throw new IllegalStateException("inference cannot keep up; microphone backlog full");
                 }
             }catch(Throwable t){if(running)fail(t);}
@@ -61,20 +68,32 @@ final class LiveAudio implements AutoCloseable {
                         if(!headphones(track.getRoutedDevice()))throw new IllegalStateException("headphone route lost");
                         int n=track.write(pcm,offset,Math.min(1600,pcm.length-offset),AudioTrack.WRITE_BLOCKING);
                         if(n<=0)throw new IllegalStateException("playback write "+n);
-                        offset+=n;
+                        offset+=n;submitted.addAndGet(n);
                     }
                 }
                 // Drain queued audio on a normal stop; stop() does not cut streaming data.
                 if(error.get()==null)track.stop();
             }catch(Throwable t){fail(t);}
         },"seamless-playback");
+        startMs=SystemClock.elapsedRealtime();
         capture.start();play.start();status.report("Listening — experimental Mandarin to English");
         try{
-            StreamingEngine.Sink sink=pcm->{if(!output.offer(pcm,2,TimeUnit.SECONDS))throw new IllegalStateException("audio playback backlog full");};
+            StreamingEngine.Sink sink=pcm->{
+                if(!output.offer(pcm,2,TimeUnit.SECONDS))throw new IllegalStateException("audio playback backlog full");
+                generated.addAndGet(pcm.length);
+                if(firstAudioMs<0)firstAudioMs=SystemClock.elapsedRealtime()-startMs;
+            };
             while(error.get()==null&&(!captureDone||!input.isEmpty())){
-                short[] pcm=input.poll(100,TimeUnit.MILLISECONDS);if(pcm!=null)engine.push(pcm,false,sink);
+                short[] pcm=input.poll(100,TimeUnit.MILLISECONDS);
+                if(pcm!=null){
+                    long t=SystemClock.elapsedRealtime();
+                    engine.push(pcm,false,sink);
+                    lastStepMs=SystemClock.elapsedRealtime()-t;computeMs+=lastStepMs;
+                    processed.addAndGet(pcm.length);
+                }
+                if(SystemClock.elapsedRealtime()-lastReportMs>=1000){report(engine,false);lastReportMs=SystemClock.elapsedRealtime();}
             }
-            if(error.get()==null)engine.push(new short[0],true,sink);
+            if(error.get()==null){long t=SystemClock.elapsedRealtime();engine.push(new short[0],true,sink);computeMs+=SystemClock.elapsedRealtime()-t;}
         }catch(Throwable t){fail(t);}
         finally{
             running=false;inferenceDone=true;
@@ -83,7 +102,19 @@ final class LiveAudio implements AutoCloseable {
             if(rec!=null)rec.release();
             AudioTrack tr=track;if(tr!=null)tr.release();
         }
+        report(engine,true);
         if(error.get()!=null)throw new IllegalStateException("stream failed",error.get());
+    }
+    private void report(StreamingEngine engine,boolean finished){
+        double in=processed.get()/16000.0;
+        Debug.MemoryInfo mem=new Debug.MemoryInfo();Debug.getMemoryInfo(mem);
+        status.report(String.format(Locale.US,
+            "%s — experimental\nInput %.1f s | processed %.1f s\nCapture backlog %.2f s | output queue %.2f s\nLast inference %d ms | processing RTF %.2f\nFirst generated audio %s\nGenerated %.1f s | submitted %.1f s\nProcess PSS %.0f MiB | context %.1f s / %d tokens | resets %d",
+            finished?"Stopped":"Listening",captured.get()/16000.0,in,
+            Math.max(0,captured.get()-processed.get())/16000.0,Math.max(0,generated.get()-submitted.get())/16000.0,
+            lastStepMs,in>0?computeMs/1000.0/in:0,firstAudioMs<0?"waiting":String.format(Locale.US,"%.2f s",firstAudioMs/1000.0),
+            generated.get()/16000.0,submitted.get()/16000.0,mem.getTotalPss()/1024.0,
+            engine.contextFrames()/100.0,engine.targetTokens(),engine.rollovers()));
     }
     @Override public void close(){
         running=false;

@@ -16,6 +16,7 @@ public final class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private TextView status;
     private Button start,load,stop;
+    private CheckBox rollover;
     private volatile LiveAudio live;
     private volatile boolean closed, busy, stopRequested;
     private File modelDir(){return new File(getFilesDir(),"models");}
@@ -24,7 +25,8 @@ public final class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         LinearLayout panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(32,48,32,32);
         TextView title=new TextView(this);title.setText("SeamlessStreaming • Mandarin → English");title.setTextSize(24);panel.addView(title);
-        status=new TextView(this);status.setText("EXPERIMENTAL — model conversion and full speech translation not validated. Headphones required. 60-second / 100-token context limit. Other languages are not filtered.");panel.addView(status);
+        status=new TextView(this);status.setText("EXPERIMENTAL — model conversion and full speech translation not validated. Headphones required. 60-second / 100-token safety limit. Optional quiet-boundary reset is unvalidated. Other languages are not filtered.");panel.addView(status);
+        rollover=new CheckBox(this);rollover.setText("Experimental adaptive context reset (may omit or repeat speech)");rollover.setChecked(false);panel.addView(rollover);
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
         stop=new Button(this);stop.setText("Stop and flush");panel.addView(stop);
@@ -36,7 +38,7 @@ public final class MainActivity extends Activity {
         stop.setOnClickListener(v->stopLive());
         setContentView(panel);buttons();
     }
-    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);}
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);}
     private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
     private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -57,13 +59,14 @@ public final class MainActivity extends Activity {
     }
     private void startLive(){
         if(busy)return;
+        final boolean adaptive=rollover.isChecked();
         busy=true;stopRequested=false;buttons();show("Loading four model sessions…");
         worker.execute(()->{
-            try(StreamingEngine engine=new StreamingEngine(modelDir())){
+            try(StreamingEngine engine=new StreamingEngine(modelDir(),adaptive)){
                 if(stopRequested||closed)return;
                 LiveAudio audio=new LiveAudio(getSystemService(AudioManager.class),this::show);live=audio;
                 if(stopRequested||closed){audio.close();return;}
-                audio.run(engine);show("Stopped.");
+                audio.run(engine);
             }catch(Exception|OutOfMemoryError e){show("Stopped: "+e+(e.getCause()==null?"":" — "+e.getCause()));}
             finally{live=null;done();}
         });

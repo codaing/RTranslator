@@ -27,4 +27,18 @@ public class StreamingTest {
         float[][] scores=new float[4][8];scores[0][4]=1;scores[1][5]=1;scores[2][2]=1;scores[3][7]=1;
         assertArrayEquals(new long[]{1,1,3},StreamingPolicy.units(scores,new long[]{1,3},1));
     }
+    @Test public void adaptiveRolloverRequiresQuietAndModelEos(){
+        ContextBoundary c=new ContextBoundary();
+        assertFalse(c.candidate(true,900,20,true,1f));
+        c.observe(new short[ContextBoundary.QUIET_SAMPLES]);
+        assertFalse(c.candidate(false,900,20,true,1f));
+        assertFalse(c.candidate(true,799,20,true,1f));
+        assertFalse(c.candidate(true,900,20,false,1f));
+        assertFalse(c.candidate(true,900,20,true,0.49f));
+        assertTrue(c.candidate(true,900,20,true,0.5f));
+        short[] speech=new short[160];Arrays.fill(speech,(short)1000);c.observe(speech);
+        assertFalse(c.candidate(true,900,20,true,1f));
+        c.observe(new short[9600]);c.reset();
+        assertFalse(c.candidate(true,900,20,true,1f));
+    }
 }
