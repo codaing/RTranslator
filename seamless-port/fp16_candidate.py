@@ -16,7 +16,7 @@ def nrms(actual,expected):
 
 
 def fix_mixed_mul_types(graph,inherited=None):
-    """Insert explicit FP32->FP16 casts on mixed-type Mul inputs in nested graphs."""
+    """Infer internal floating types and cast FP32 operands of mixed FP16 Mul nodes."""
     dtypes=dict(inherited or {})
     shapes={}
     for vi in list(graph.input)+list(graph.value_info)+list(graph.output):
@@ -25,9 +25,12 @@ def fix_mixed_mul_types(graph,inherited=None):
             dtypes[vi.name]=tt.elem_type
             shapes[vi.name]=[d.dim_value if d.HasField("dim_value") else None for d in tt.shape.dim] if tt.HasField("shape") else None
     for tensor in graph.initializer:
-        dtypes[tensor.name]=tensor.data_type;shapes[tensor.name]=list(tensor.dims)
+        dtypes[tensor.name]=tensor.data_type
+        shapes[tensor.name]=list(tensor.dims)
     patched=0;new_nodes=[]
+    binary_float_ops={"Add","Sub","Mul","Div","Pow"}
     for node in graph.node:
+        # Infer nested subgraph input types from values already seen in the parent.
         for attr in node.attribute:
             if attr.type==onnx.AttributeProto.GRAPH:
                 patched+=fix_mixed_mul_types(attr.g,dtypes)
@@ -36,33 +39,49 @@ def fix_mixed_mul_types(graph,inherited=None):
         if node.op_type=="Constant":
             for attr in node.attribute:
                 if attr.name=="value" and attr.type==onnx.AttributeProto.TENSOR:
-                    dtypes[node.output[0]]=attr.t.data_type;shapes[node.output[0]]=list(attr.t.dims)
+                    dtypes[node.output[0]]=attr.t.data_type
+                    shapes[node.output[0]]=list(attr.t.dims)
         casts=[]
-        if node.op_type=="Mul":
+        if node.op_type in binary_float_ops:
             known=[dtypes.get(name) for name in node.input]
             if onnx.TensorProto.FLOAT in known and onnx.TensorProto.FLOAT16 in known:
                 for index,dtype in enumerate(known):
                     if dtype==onnx.TensorProto.FLOAT:
                         original=node.input[index]
-                        cast_out=f"{original}__to_fp16_for_mul_{patched}"
-                        cast_name=f"cast_fp16_for_mul_{patched}"
-                        casts.append(onnx.helper.make_node("Cast",[original],[cast_out],to=onnx.TensorProto.FLOAT16,name=cast_name))
-                        dtypes[cast_out]=onnx.TensorProto.FLOAT16;shapes[cast_out]=shapes.get(original)
-                        vi=onnx.helper.make_tensor_value_info(cast_out,onnx.TensorProto.FLOAT16,shapes.get(original))
-                        graph.value_info.append(vi)
-                        node.input[index]=cast_out;patched+=1
+                        cast_out=f"{original}__to_fp16_for_{node.name.replace('/','_')}_{index}"
+                        cast_name=f"cast_fp16_for_{node.name.replace('/','_')}_{index}"
+                        casts.append(onnx.helper.make_node("Cast",[original],[cast_out],
+                            to=onnx.TensorProto.FLOAT16,name=cast_name))
+                        dtypes[cast_out]=onnx.TensorProto.FLOAT16
+                        shapes[cast_out]=shapes.get(original)
+                        graph.value_info.append(onnx.helper.make_tensor_value_info(
+                            cast_out,onnx.TensorProto.FLOAT16,shapes.get(original)))
+                        node.input[index]=cast_out
+                        patched+=1
                 if node.output:
                     dtypes[node.output[0]]=onnx.TensorProto.FLOAT16
                     for vi in graph.value_info:
-                        if vi.name==node.output[0]:vi.type.tensor_type.elem_type=onnx.TensorProto.FLOAT16
-        new_nodes.extend(casts);new_nodes.append(node)
+                        if vi.name==node.output[0]:
+                            vi.type.tensor_type.elem_type=onnx.TensorProto.FLOAT16
+        new_nodes.extend(casts)
+        new_nodes.append(node)
         if node.op_type=="Cast":
             to=next((a.i for a in node.attribute if a.name=="to"),None)
             if to is not None and node.output:dtypes[node.output[0]]=to
-        elif node.op_type in ("Add","Sub","Mul","Div","Pow") and node.output:
-            types=[dtypes.get(n) for n in node.input if n in dtypes]
-            if types and len(set(types))==1:dtypes[node.output[0]]=types[0]
-    graph.ClearField("node");graph.node.extend(new_nodes)
+        elif node.op_type=="Constant":
+            pass
+        else:
+            # Most neural-network operators preserve the floating element type
+            # of their data input. This propagates types through MatMul/Transpose
+            # and lets us detect mixed-type scalar operands downstream.
+            floating=[dtypes.get(name) for name in node.input
+                      if dtypes.get(name) in (onnx.TensorProto.FLOAT,onnx.TensorProto.FLOAT16)]
+            if floating:
+                inferred=floating[0]
+                for out in node.output:
+                    if out not in dtypes:dtypes[out]=inferred
+    graph.ClearField("node")
+    graph.node.extend(new_nodes)
     return patched
 
 def main(component,directory):
