@@ -100,12 +100,13 @@ def main(component,directory):
         model=convert_float_to_float16(model,keep_io_types=True,disable_shape_infer=True,
                                        op_block_list=list(DEFAULT_OP_BLOCK_LIST)+["Mul"],
                                        node_block_list=blocked)
-        onnx.save_model(model,str(output),save_as_external_data=True,all_tensors_to_one_file=True,
-            location=output.name+".weights",size_threshold=1024)
-        onnx.checker.check_model(str(output))
         result["conversion_seconds"]=time.monotonic()-start
         result["mixed_mul_casts"]=fix_mixed_mul_types(model.graph)
         weights=directory/(output.name+".weights")
+        weights.unlink(missing_ok=True)
+        onnx.save_model(model,str(output),save_as_external_data=True,all_tensors_to_one_file=True,
+            location=output.name+".weights",size_threshold=1024)
+        onnx.checker.check_model(str(output))
         result["fp16_bytes"]=output.stat().st_size+(weights.stat().st_size if weights.exists() else 0)
         options=ort.SessionOptions();options.intra_op_num_threads=4;options.inter_op_num_threads=1
         session=ort.InferenceSession(str(output),sess_options=options,providers=["CPUExecutionProvider"])
