@@ -28,8 +28,17 @@ on:
         description: 'Run full speech test and package noncommercial model weights'
         type: boolean
         default: false
+      reuse_base_run:
+        description: 'Optional previous run ID with validated encoder/units/vocoder artifacts; requires package_models'
+        type: string
+        default: ''
 permissions:
   contents: read
+  actions: read
+env:
+  # One explicit recovery run can reuse the successful three non-decoder
+  # artifacts from the previous run; normal packaging always exports all four.
+  REUSE_BASE_RUN: ${{ inputs.reuse_base_run || (github.event_name == 'push' && contains(github.event.head_commit.message, '[reuse-45949255038]') && '45949255038') || '' }}
 defaults:
   run:
     shell: bash
@@ -42,7 +51,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        component: [vocoder, encoder, decoder, units]
+        component: ${{ fromJSON((inputs.package_models == true && inputs.reuse_base_run != '' || github.event_name == 'push' && contains(github.event.head_commit.message, '[reuse-45949255038]')) && '["decoder"]' || '["vocoder","encoder","decoder","units"]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -104,8 +113,13 @@ jobs:
             model-check/*.txt
           if-no-files-found: warn
       - name: Stage verified model component
+        timeout-minutes: 10
         if: inputs.package_models == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package-models]'))
-        run: python seamless-port/model_pack.py stage "${{ matrix.component }}" model-check model-part
+        run: |
+          df -h .
+          python -u seamless-port/model_pack.py stage "${{ matrix.component }}" model-check model-part
+          du -sh model-part
+          df -h .
       - name: Transfer verified model component for integrated test
         if: inputs.package_models == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package-models]'))
         uses: actions/upload-artifact@v4
@@ -132,6 +146,30 @@ jobs:
         with:
           pattern: model-part-*
           path: components
+      - name: Restore previously validated speech encoder
+        if: env.REUSE_BASE_RUN != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: model-part-encoder
+          path: components/model-part-encoder
+          run-id: ${{ env.REUSE_BASE_RUN }}
+          github-token: ${{ github.token }}
+      - name: Restore previously validated acoustic units
+        if: env.REUSE_BASE_RUN != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: model-part-units
+          path: components/model-part-units
+          run-id: ${{ env.REUSE_BASE_RUN }}
+          github-token: ${{ github.token }}
+      - name: Restore previously validated vocoder
+        if: env.REUSE_BASE_RUN != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: model-part-vocoder
+          path: components/model-part-vocoder
+          run-id: ${{ env.REUSE_BASE_RUN }}
+          github-token: ${{ github.token }}
       - name: Install reference audio and ONNX tools
         run: |
           sudo apt-get update
@@ -153,8 +191,10 @@ jobs:
         run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
       - name: Assemble and run four-model speech smoke test
         run: |
-          python seamless-port/model_pack.py merge components models
+          df -h .
+          python -u seamless-port/model_pack.py merge components models
           rm -rf components
+          df -h .
           python -u seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav 2>&1 | tee speech-reports/smoke.log
       - name: Collect speech report
         if: always()
@@ -169,7 +209,7 @@ jobs:
           path: speech-reports/
           if-no-files-found: warn
       - name: Generate Android import ZIP
-        run: python seamless-port/model_pack.py pack models seamless-int8-experimental.zip
+        run: python -u seamless-port/model_pack.py pack models seamless-int8-experimental.zip
       - uses: actions/upload-artifact@v4
         with:
           name: Seamless-INT8-experimental-model-pack

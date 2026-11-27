@@ -2,6 +2,8 @@
 import argparse
 import hashlib
 import json
+import os
+import time
 from pathlib import Path
 import re
 import shutil
@@ -29,11 +31,26 @@ def digest(path):
 
 
 def copy_unique(src,dst):
+    """Staging sources are immutable; hardlink where possible to save disk."""
+    src,dst=Path(src),Path(dst)
+    if not src.is_file():raise FileNotFoundError(src)
+    start=time.monotonic()
+    size=src.stat().st_size
     if dst.exists():
-        if digest(src)!=digest(dst):
-            raise ValueError(f"conflicting filename: {dst.name}")
+        if not src.samefile(dst):
+            if size!=dst.stat().st_size or digest(src)!=digest(dst):
+                raise ValueError(f"conflicting filename: {dst.name}")
+        method="reuse"
     else:
-        shutil.copyfile(src,dst)
+        try:
+            os.link(src,dst)
+            method="hardlink"
+        except OSError:
+            if shutil.disk_usage(dst.parent).free<size:
+                raise OSError(f"insufficient space for {dst.name}: {size} bytes")
+            shutil.copyfile(src,dst)
+            method="copy"
+    print(f"{method} {dst.name}: {size:,} bytes ({time.monotonic()-start:.2f}s)",flush=True)
 
 
 def tensors(graph):
@@ -66,12 +83,19 @@ def stage(component,source,destination):
     if component=="decoder" and not any(n.op_type=="MatMulNBits" and n.domain=="com.microsoft" for n in graph.graph.node):
         raise ValueError("decoder is missing native packed matrix multiplication")
     copy_unique(source/name,destination/name)
+    locations=set()
+    refs=0
     for t in tensors(graph.graph):
         if uses_external_data(t):
-            location=dict((e.key,e.value) for e in t.external_data)["location"]
+            info={e.key:e.value for e in t.external_data}
+            location=info["location"]
             if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}",location) or location in (".",".."):
                 raise ValueError(f"unsafe or nested external file: {location}")
-            copy_unique(source/location,destination/location)
+            locations.add(location)
+            refs+=1
+    print(f"Stage {component}: {refs:,} external tensor references, {len(locations):,} unique files",flush=True)
+    for location in sorted(locations):
+        copy_unique(source/location,destination/location)
     copy_unique(marker,destination/marker.name)
     if component=="units":
         copy_unique(source/"tokenizer.json",destination/"tokenizer.json")
@@ -86,18 +110,29 @@ def merge(source,destination):
 
 def pack(source,output):
     required=set(NAMES.values())|{"tokenizer.json","MODEL-LICENSE.txt"}
-    files=sorted(p for p in source.iterdir() if p.is_file())
+    files=sorted(p for p in source.iterdir() if p.is_file() and p.name!="sha256.json")
+    if output.resolve().parent==source.resolve():
+        raise ValueError("output ZIP must be outside model folder")
     if not required.issubset({p.name for p in files}):
         raise ValueError("missing required model files")
     # This ZIP is generated only after the four-model smoke test succeeds.
     check=json.loads((source/"speech-smoke.json").read_text())
     if check.get("result")!="PASS":
         raise ValueError("speech smoke gate not passed")
-    (source/"sha256.json").write_text(json.dumps({p.name:digest(p) for p in files},indent=2)+"\n")
+    total=sum(p.stat().st_size for p in files)
+    if shutil.disk_usage(output.parent).free<total+8*1024*1024:
+        raise OSError(f"insufficient free disk for {total:,} byte model ZIP")
+    hashes={}
+    for p in files:
+        print(f"Hashing {p.name} ({p.stat().st_size:,} bytes)",flush=True)
+        hashes[p.name]=digest(p)
+    (source/"sha256.json").write_text(json.dumps(hashes,indent=2)+"\n")
     with zipfile.ZipFile(output,"w",compression=zipfile.ZIP_STORED,allowZip64=True) as z:
         for p in sorted(source.iterdir()):
             if p.is_file():
+                print(f"Adding {p.name} ({p.stat().st_size:,} bytes)",flush=True)
                 z.write(p,p.name)
+    print(f"Model ZIP: {output.stat().st_size:,} bytes",flush=True)
 
 
 if __name__=="__main__":
