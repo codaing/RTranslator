@@ -71,9 +71,10 @@ public final class MainActivity extends Activity {
     private void startLive(){
         if(busy)return;
         final boolean adaptive=rollover.isChecked();
+        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked();
         busy=true;stopRequested=false;buttons();show("Loading four model sessions…");
         worker.execute(()->{
-            try(StreamingEngine engine=new StreamingEngine(modelDir(),adaptive,xnnpack.isChecked(),nnapi.isChecked())){
+            try(StreamingEngine engine=new StreamingEngine(modelDir(),adaptive,useXnnpack,useNnapi)){
                 if(stopRequested||closed)return;
                 LiveAudio audio=new LiveAudio(getSystemService(AudioManager.class),this::show);live=audio;
                 if(stopRequested||closed){audio.close();return;}
@@ -83,12 +84,13 @@ public final class MainActivity extends Activity {
         });
     }
     private void runBenchmark(Uri uri){
+        final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked();
         busy=true;stopRequested=false;lastReport=null;buttons();show("Reading benchmark WAV…");
         worker.execute(()->{
             try(InputStream in=getContentResolver().openInputStream(uri)){
                 if(in==null)throw new IOException("Cannot open WAV");
                 lastReport=OfflineBenchmark.run(modelDir(),in,()->stopRequested||closed,this::show,
-                    xnnpack.isChecked(),nnapi.isChecked());
+                    useXnnpack,useNnapi);
                 show(lastReport);
             }catch(Exception|OutOfMemoryError e){lastReport="Benchmark stopped: "+e;show(lastReport);}
             finally{done();}

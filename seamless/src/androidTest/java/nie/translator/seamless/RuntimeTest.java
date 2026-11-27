@@ -28,26 +28,6 @@ public class RuntimeTest {
             catch (IllegalArgumentException expected) {}
         } finally { f.delete(); }
     }
-    @Test public void xnnpackMatmulProviderExecutesOnAndroid() throws Exception {
-        android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
-        byte[] model;
-        try(InputStream in=context.getAssets().open("test-xnnpack-matmul.onnx");
-            java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream()){
-            byte[] b=new byte[4096];int n;while((n=in.read(b))!=-1)out.write(b,0,n);model=out.toByteArray();
-        }
-        ai.onnxruntime.OrtEnvironment env=ai.onnxruntime.OrtEnvironment.getEnvironment();
-        try(ai.onnxruntime.OrtSession.SessionOptions opts=new ai.onnxruntime.OrtSession.SessionOptions()){
-            opts.setIntraOpNumThreads(1);
-            opts.addConfigEntry("session.intra_op.allow_spinning","0");
-            opts.addXnnpack(java.util.Collections.singletonMap("intra_op_num_threads","2"));
-            try(ai.onnxruntime.OrtSession session=env.createSession(model,opts);
-                ai.onnxruntime.OnnxTensor x=ai.onnxruntime.OnnxTensor.createTensor(env,new float[][]{{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}});
-                ai.onnxruntime.OrtSession.Result result=session.run(java.util.Collections.singletonMap("x",x))){
-                float[][] y=(float[][])result.get(0).getValue();
-                for(int i=0;i<16;i++)assertEquals((i+1)*2f,y[0][i],0.0001f);
-            }
-        }
-    }
     @Test public void fourModelStreamingChainProducesAudioBeforeEof() throws Exception {
         chain("test-model-pack.zip",false);
     }

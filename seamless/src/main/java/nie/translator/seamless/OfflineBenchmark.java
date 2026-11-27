@@ -10,8 +10,7 @@ import android.os.SystemClock;
 
 /** Offline diagnostic; consumes source in the same 320 ms transport frames. */
 final class OfflineBenchmark {
-    static String run(File dir,InputStream in,BooleanSupplier cancelled,LiveAudio.Status status,
-                      boolean xnnpackFp32Stages,boolean nnapiEncoder)throws Exception{
+    static String run(File dir,InputStream in,BooleanSupplier cancelled,LiveAudio.Status status)throws Exception{
         short[] samples=BenchmarkWav.read(in);
         if(cancelled.getAsBoolean())throw new CancellationException("Cancelled");
         status.report("Benchmark: loading real model sessions…");
@@ -22,7 +21,7 @@ final class OfflineBenchmark {
         final double[] energy={0};
         long computeStart;
         int tokens;String decoderMode;
-        try(StreamingEngine engine=new StreamingEngine(dir,false,xnnpackFp32Stages,nnapiEncoder)){
+        try(StreamingEngine engine=new StreamingEngine(dir,false)){
             load=SystemClock.elapsedRealtime()-start;
             peak[0]=Math.max(peak[0],Debug.getPss());
             computeStart=SystemClock.elapsedRealtime();
@@ -50,8 +49,8 @@ final class OfflineBenchmark {
         }
         long elapsed=SystemClock.elapsedRealtime()-computeStart;
         double duration=samples.length/16000.0,rtf=elapsed/1000.0/duration;
-        return String.format(Locale.US,"Offline WAV benchmark (experimental)\nDevice %s / Android %s\nDecoder %s\nNNAPI encoder requested: %s | XNNPACK FP32 stages requested: %s\nInput %.2f s | generated %.2f s\nModel load %.2f s | processing %.2f s (includes final flush and session close)\nRTF %.3f (below 1 is faster than audio duration)\nFirst generated audio %s | source consumed %s | before flush %s\nSampled peak PSS %.0f MiB | tokens %d\nWaveform RMS %.6f\nNo microphone, playback, network or TTS used. This is not a translation accuracy or live headphone latency test.",
-            android.os.Build.MODEL,android.os.Build.VERSION.RELEASE,decoderMode,nnapiEncoder,xnnpackFp32Stages,duration,generated[0]/16000.0,load/1000.0,elapsed/1000.0,rtf,
+        return String.format(Locale.US,"Offline WAV benchmark (experimental)\nDevice %s / Android %s\nDecoder %s\nInput %.2f s | generated %.2f s\nModel load %.2f s | processing %.2f s (includes final flush and session close)\nRTF %.3f (below 1 is faster than audio duration)\nFirst generated audio %s | source consumed %s | before flush %s\nSampled peak PSS %.0f MiB | tokens %d\nWaveform RMS %.6f\nNo microphone, playback, network or TTS used. This is not a translation accuracy or live headphone latency test.",
+            android.os.Build.MODEL,android.os.Build.VERSION.RELEASE,decoderMode,duration,generated[0]/16000.0,load/1000.0,elapsed/1000.0,rtf,
             first[0]<0?"none":String.format(Locale.US,"%.2f s",first[0]/1000.0),firstSource[0]<0?"none":String.format(Locale.US,"%.2f s",firstSource[0]/16000.0),beforeEof[0]?"yes":"no",
             peak[0]/1024.0,tokens,generated[0]>0?Math.sqrt(energy[0]/generated[0]):0);
     }
