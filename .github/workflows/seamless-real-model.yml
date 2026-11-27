@@ -6,6 +6,8 @@ on:
       - 'seamless-port/export*.py'
       - 'seamless-port/shaw_export.py'
       - 'seamless-port/sdpa_export.py'
+      - 'seamless-port/inspect_encoder.py'
+      - 'seamless-port/shaw_regression.py'
       - 'seamless-port/quantize_int8.py'
       - '.github/workflows/seamless-real-model.yml'
   workflow_dispatch:
@@ -35,6 +37,9 @@ jobs:
           git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
           python -m pip install -e /tmp/meta-seamless 'numpy<2' 'onnx==1.16.2' 'onnxruntime==1.18.1'
           python -c 'import torch, fairseq2; print(torch.__version__, fairseq2.__version__)'
+      - name: Check dynamic Shaw attention without checkpoint
+        if: matrix.component == 'encoder'
+        run: python seamless-port/shaw_regression.py
       - name: Export actual checkpoint and compare with PyTorch
         shell: bash
         run: |
@@ -58,4 +63,5 @@ jobs:
           path: |
             model-check/*.json
             model-check/*.log
+            model-check/*.txt
           if-no-files-found: warn

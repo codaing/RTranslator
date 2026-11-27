@@ -8,7 +8,13 @@ import types
 import torch
 from fairseq2.nn.transformer.shaw_attention import ShawRelativePositionSDPA
 from fairseq2.nn.transformer.attention_mask import CustomAttentionMask
-from sdpa_export import axis, mask_tensor, attention
+from sdpa_export import mask_tensor, attention
+
+
+def positions(x):
+    # Keep the time axis connected to real activation data, avoiding scalar
+    # shape conversions in the legacy TorchScript ONNX tracer.
+    return torch.cumsum(torch.ones_like(x[0, 0, :, 0], dtype=torch.long), dim=0) - 1
 
 
 def forward(self, seqs, keys, key_padding_mask, values, *,
@@ -16,8 +22,9 @@ def forward(self, seqs, keys, key_padding_mask, values, *,
     # The Seamless streaming Conformer uses no relative value embedding.
     if self.rel_v_embed is not None:
         raise NotImplementedError("Relative value embeddings require a separate export")
-    q = axis(seqs, 2) + torch._shape_as_tensor(keys)[2] - torch._shape_as_tensor(seqs)[2]
-    k = axis(keys, 2)
+    q = positions(seqs)
+    k = positions(keys)
+    q = q + k[-1] - q[-1]
     indices = (k[None, :] - q[:, None]).clamp(
         -self.max_left_rel_pos, self.max_right_rel_pos) + self.max_left_rel_pos
     table = self.rel_k_embed.weight

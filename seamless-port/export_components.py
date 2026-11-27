@@ -112,7 +112,7 @@ def main():
                 torch.testing.assert_close(wrapper(*inputs), expected, rtol=0.002, atol=0.0002)
         torch.onnx.export(wrapper, examples[0], str(model_path), input_names=names,
                           output_names=outputs, dynamic_axes=axes, opset_version=17,
-                          do_constant_folding=True)
+                          do_constant_folding=args.component != "encoder")
         onnx.checker.check_model(str(model_path))
         session = ort.InferenceSession(str(model_path), providers=["CPUExecutionProvider"])
         results = []
@@ -121,7 +121,15 @@ def main():
             if isinstance(expected, torch.Tensor):
                 expected = (expected,)
             start = time.monotonic()
-            actual = session.run(outputs, {n: t.numpy() for n, t in zip(names, inputs)})
+            print(f"Checking {args.component} case {case}: {[list(t.shape) for t in inputs]}", flush=True)
+            feeds = {n: t.numpy() for n, t in zip(names, inputs)}
+            try:
+                actual = session.run(outputs, feeds)
+            except Exception:
+                if args.component == "encoder":
+                    from inspect_encoder import inspect_failure
+                    inspect_failure(model_path, feeds, args.output)
+                raise
             elapsed = time.monotonic() - start
             for e, a in zip(expected, actual):
                 e = e.detach().cpu().numpy()
