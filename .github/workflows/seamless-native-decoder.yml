@@ -1,0 +1,64 @@
+name: Native packed decoder INT8 validation
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-native-decoder.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  native-decoder:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pinned reference and export FP32
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 ffmpeg
+          python -m pip install 'numpy<2' 'torch==2.1.1' 'torchaudio==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless 'numpy<2' 'onnx==1.16.2' 'onnxruntime==1.18.1'
+          mkdir -p model-check
+          python -u seamless-port/export_components.py decoder model-check 2>&1 | tee model-check/export.log
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime matching Android version
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
+      - name: Validate native packed INT8 numerical layout
+        run: python -u seamless-port/native8_probe.py
+      - name: Evaluate native decoder candidates
+        run: |
+          passed=0
+          for mode in symmetric asymmetric output-only; do
+            args=()
+            case "$mode" in
+              asymmetric) args=(--asymmetric);;
+              output-only) args=(--asymmetric --subset output_proj);;
+            esac
+            if python -u seamless-port/quantize_int8.py decoder model-check --native "${args[@]}" 2>&1 | tee "model-check/native-$mode.log"; then
+              passed=1
+              break
+            fi
+            rm -f model-check/decoder.native8-*.onnx model-check/decoder.native8-*.onnx.weights
+          done
+          test "$passed" = 1
+      - name: Upload numerical and memory reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-decoder-validation-reports
+          path: |
+            model-check/*.json
+            model-check/*.log
+          if-no-files-found: warn

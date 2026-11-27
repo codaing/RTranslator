@@ -67,11 +67,25 @@ def evaluate(directory):
                 np.testing.assert_allclose(logits,f["logits"],rtol=0.02,atol=0.002)
                 np.testing.assert_array_equal(logits.argmax(-1),f["logits"].argmax(-1))
         del session
-    with phase("units INT8 quantization"):
+    with phase("units selective post-duration INT8 quantization"):
         folded=prepare(source)
+        graph=onnx.load(str(folded),load_external_data=False).graph
+        initializers={t.name for t in graph.initializer}
+        # Quantize only post-duration acoustic decoder FFNs, not encoder,
+        # character upsampler, duration predictor, attention or final projection.
+        import re
+        selected=[n.name for n in graph.node if n.op_type in ("MatMul","Gemm") and len(n.input)>1
+                  and n.input[1] in initializers and re.search(r"(?:^|/)decoder/(?:layers[^/]*)/.*(?:^|/)ffn/(?:inner_proj|output_proj)(?:/|$)",n.name)
+                  and "decoder_frontend" not in n.name]
+        results["policy"]="post-duration-decoder-ffn-only"
+        results["selected_nodes"]=selected
+        results["available_matrix_names"]=[n.name for n in graph.node if n.op_type in ("MatMul","Gemm")]
+        save()
+        if not selected:raise RuntimeError("No eligible post-duration acoustic FFN nodes identified")
+        del graph
         quantize_dynamic(str(folded),str(output),weight_type=QuantType.QInt8,per_channel=True,
-                         op_types_to_quantize=["MatMul","Gemm"],extra_options={"MatMulConstBOnly":True},
-                         use_external_data_format=True)
+                         op_types_to_quantize=["MatMul","Gemm"],nodes_to_quantize=selected,
+                         extra_options={"MatMulConstBOnly":True},use_external_data_format=True)
     onnx.checker.check_model(str(output))
     g=onnx.load(str(output),load_external_data=False)
     results["quantized_ops"]=sum(n.op_type in ("MatMulInteger","QLinearMatMul","DynamicQuantizeMatMul","QGemm") for n in g.graph.node)

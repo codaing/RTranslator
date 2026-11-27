@@ -42,10 +42,12 @@ def grouped_weight(weight,group=GROUP):
     return quantized,scale
 
 
-def convert(source,output,selected,group=GROUP):
+def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
     source,output=Path(source),Path(output)
     model=onnx.load(str(source),load_external_data=False)
     graph=model.graph
+    if native and not any(o.domain=="com.microsoft" for o in model.opset_import):
+        model.opset_import.append(h.make_opsetid("com.microsoft",1))
     initializers={t.name:t for t in graph.initializer}
     selected=set(selected)
     if not selected:raise ValueError("empty weight-only selection")
@@ -54,6 +56,7 @@ def convert(source,output,selected,group=GROUP):
     data_name=output.name+".weights"
     replacements={}
     packed=[]
+    native_inputs={}
     # Store all new arrays and all retained external tensors in one compact file.
     # Otherwise a shared original FP32 external-data file could defeat compression.
     with (output.parent/data_name).open("wb") as data:
@@ -82,21 +85,52 @@ def convert(source,output,selected,group=GROUP):
                 t=initializers[weight_name]
                 weight=nh.to_array(t,base_dir=str(source.parent))
                 if weight.dtype!=np.float32:raise ValueError("expected FP32 weight")
-                q,s=grouped_weight(weight,group)
                 tag="weight_only/"+str(len(replacements))
-                qn,sn,sh,dq,reshaped,restored=[tag+x for x in ("/q","/scale","/shape","/dequant","/rows","/weight")]
-                if any(x in names for x in (qn,sn,sh,dq,reshaped,restored)):raise ValueError("name collision")
-                append_array(qn,q)
-                append_array(sn,s)
-                graph.initializer.append(nh.from_array(np.array([weight.shape[1],weight.shape[0]],np.int64),name=sh))
-                new_nodes.extend([
-                    h.make_node("DequantizeLinear",[qn,sn],[dq],axis=0,name=tag+"/DequantizeLinear"),
-                    h.make_node("Reshape",[dq,sh],[reshaped],name=tag+"/Reshape"),
-                    h.make_node("Transpose",[reshaped],[restored],perm=[1,0],name=tag+"/Transpose")])
-                replacements[weight_name]=restored
-                del weight,q,s
-            n.input[1]=replacements[weight_name]
-            new_nodes.append(n)
+                if native:
+                    k,n=weight.shape
+                    if asymmetric:
+                        blocks=np.ascontiguousarray(weight.T).reshape(-1,group)
+                        lo=np.minimum(blocks.min(axis=1),0)
+                        hi=np.maximum(blocks.max(axis=1),0)
+                        s=(hi-lo)/np.float32(255)
+                        s=np.where(s>0,s,np.float32(1)).astype(np.float32)
+                        z=np.clip(np.rint(-lo/s),0,255).astype(np.uint8)
+                        q=np.clip(np.rint(blocks/s[:,None])+z[:,None].astype(np.float32),0,255).astype(np.uint8)
+                        del blocks,lo,hi
+                    else:
+                        q,s=grouped_weight(weight,group)
+                        q=(q.astype(np.int16)+128).astype(np.uint8)
+                        z=None
+                    qn,sn,zn=[tag+x for x in ("/packed","/scale","/zero")]
+                    if any(x in names for x in (qn,sn,zn)):raise ValueError("name collision")
+                    append_array(qn,q.reshape(n,k//group,group))
+                    append_array(sn,s.reshape(-1))
+                    extra=[qn,sn]
+                    if z is not None:
+                        append_array(zn,z.reshape(-1));extra.append(zn)
+                    native_inputs[weight_name]=(extra,k,n)
+                    replacements[weight_name]=qn
+                    del weight,q,s,z
+                else:
+                    q,s=grouped_weight(weight,group)
+                    qn,sn,sh,dq,reshaped,restored=[tag+x for x in ("/q","/scale","/shape","/dequant","/rows","/weight")]
+                    if any(x in names for x in (qn,sn,sh,dq,reshaped,restored)):raise ValueError("name collision")
+                    append_array(qn,q)
+                    append_array(sn,s)
+                    graph.initializer.append(nh.from_array(np.array([weight.shape[1],weight.shape[0]],np.int64),name=sh))
+                    new_nodes.extend([
+                        h.make_node("DequantizeLinear",[qn,sn],[dq],axis=0,name=tag+"/DequantizeLinear"),
+                        h.make_node("Reshape",[dq,sh],[reshaped],name=tag+"/Reshape"),
+                        h.make_node("Transpose",[reshaped],[restored],perm=[1,0],name=tag+"/Transpose")])
+                    replacements[weight_name]=restored
+                    del weight,q,s
+            if native:
+                extra,k,nout=native_inputs[weight_name]
+                new_nodes.append(h.make_node("MatMulNBits",[n.input[0]]+extra,list(n.output),
+                    domain="com.microsoft",name=n.name,K=k,N=nout,bits=8,block_size=group,accuracy_level=0))
+            else:
+                n.input[1]=replacements[weight_name]
+                new_nodes.append(n)
         del graph.node[:];graph.node.extend(new_nodes)
         # Retain originals that are used by any other operation or graph output.
         live={i for n in graph.node for i in n.input}|{v.name for v in graph.input}|{v.name for v in graph.output}
