@@ -11,7 +11,7 @@ import onnx
 from onnx import helper as h, numpy_helper as nh, TensorProto as T
 
 
-def rewrite(graph, expected_layers=24):
+def rewrite(graph, expected_layers=24, base_dir=""):
     nodes = list(graph.node)
     producers = {out: n for n in nodes for out in n.output}
     prefixes = [n.name[:-len("/MatMul")] for n in nodes
@@ -44,7 +44,7 @@ def rewrite(graph, expected_layers=24):
             a = next((a.t for a in node.attribute if a.name == "value"), None)
             if a is None or a.data_type != T.INT64 or len(a.dims) != rank:
                 return False
-            return bool(np.all(nh.to_array(a) == value))
+            return bool(np.all(nh.to_array(a, base_dir=str(base_dir)) == value))
 
         for suffix, tensor, dim in (("/CumSum", q, 2), ("/CumSum_1", kt, 3)):
             scan = by_name[p + suffix]
@@ -110,7 +110,7 @@ def rewrite(graph, expected_layers=24):
 def repair(path):
     path = Path(path)
     model = onnx.load(str(path), load_external_data=False)
-    rewrite(model.graph)
+    rewrite(model.graph, base_dir=path.parent)
     tmp = path.with_suffix(".repair.onnx")
     onnx.save_model(model, str(tmp))
     onnx.checker.check_model(str(tmp))

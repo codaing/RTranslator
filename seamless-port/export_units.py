@@ -97,6 +97,9 @@ def main():
             for a,e in zip(actual, expected):
                 np.testing.assert_allclose(a,e.numpy(),rtol=0.02,atol=0.002)
             np.testing.assert_array_equal(actual[0].argmax(-1),expected[0].numpy().argmax(-1))
+    # Export tokenizer metadata from the same checkpoint, avoiding guessed IDs.
+    from export_token_metadata import write_metadata
+    write_metadata(model.decoder_frontend, tokenizer, directory)
     marker.write_text(json.dumps({"component":"units","precision":"fp32","parity":"PASS","cases":len(cases)})+"\n")
 
 

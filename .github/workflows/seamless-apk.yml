@@ -28,7 +28,7 @@ jobs:
           python -m pip install 'numpy<2' 'onnx==1.16.2'
           python seamless-port/make_android_fixture.py
       - name: Build minimal APK and instrumentation tests
-        run: bash ./gradlew -PseamlessOnly :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
+        run: bash ./gradlew -PseamlessOnly :seamless:testDebugUnitTest :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
       - name: Verify APK and native library packaging
         run: |
           mkdir -p install-diagnostics
@@ -63,5 +63,5 @@ jobs:
       - name: Upload clearly labeled test APK
         uses: actions/upload-artifact@v4
         with:
-          name: Seamless-port-vocoder-test-NOT-A-TRANSLATOR
+          name: Seamless-streaming-integration-UNVALIDATED
           path: seamless/build/outputs/apk/release/seamless-release.apk

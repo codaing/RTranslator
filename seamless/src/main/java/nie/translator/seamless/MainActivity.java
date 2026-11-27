@@ -1,115 +1,74 @@
 package nie.translator.seamless;
 
+import android.Manifest;
 import android.app.Activity;
-import android.os.Bundle;
-import android.widget.LinearLayout;
-import android.widget.TextView;
-import android.widget.Button;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.media.AudioManager;
 import android.net.Uri;
-import android.media.AudioAttributes;
-import android.media.AudioFormat;
-import android.media.AudioTrack;
-import java.io.File;
-import java.io.InputStream;
-import java.io.FileOutputStream;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import android.os.Bundle;
+import android.view.WindowManager;
+import android.widget.*;
+import java.io.*;
+import java.util.concurrent.*;
 
 public final class MainActivity extends Activity {
-    private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private TextView status;
-    private Button test;
-    private volatile boolean closed;
-    private volatile AudioTrack track;
-
-    @Override public void onCreate(Bundle saved) {
-        super.onCreate(saved);
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setPadding(32, 48, 32, 32);
-        TextView title = new TextView(this);
-        title.setText("Mandarin to English — SeamlessStreaming port");
-        title.setTextSize(24);
-        panel.addView(title);
-        status = new TextView(this);
-        status.setText("Development test only. Live translation is not implemented. Import a self-contained validated vocoder.onnx to test acoustic-unit synthesis; the encoder and unit decoder are not connected.");
-        panel.addView(status);
-        Button load = new Button(this);
-        load.setText("Import vocoder.onnx");
-        load.setOnClickListener(v -> {
-            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            intent.setType("*/*");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            startActivityForResult(intent, 17);
+    private Button start,load,stop;
+    private volatile LiveAudio live;
+    private volatile boolean closed, busy, stopRequested;
+    private File modelDir(){return new File(getFilesDir(),"models");}
+    @Override public void onCreate(Bundle state){
+        super.onCreate(state);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        LinearLayout panel=new LinearLayout(this);panel.setOrientation(LinearLayout.VERTICAL);panel.setPadding(32,48,32,32);
+        TextView title=new TextView(this);title.setText("SeamlessStreaming • Mandarin → English");title.setTextSize(24);panel.addView(title);
+        status=new TextView(this);status.setText("EXPERIMENTAL — model conversion and full speech translation not validated. Headphones required. 60-second / 100-token context limit. Other languages are not filtered.");panel.addView(status);
+        load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
+        start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
+        stop=new Button(this);stop.setText("Stop and flush");panel.addView(stop);
+        load.setOnClickListener(v->{Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);startActivityForResult(i,17);});
+        start.setOnClickListener(v->{
+            if(checkSelfPermission(Manifest.permission.RECORD_AUDIO)!=PackageManager.PERMISSION_GRANTED){requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO},18);return;}
+            startLive();
         });
-        panel.addView(load);
-        test = new Button(this);
-        test.setText("Test vocoder (synthetic units, not translation)");
-        test.setEnabled(model().isFile());
-        test.setOnClickListener(v -> runVocoder());
-        panel.addView(test);
-        setContentView(panel);
+        stop.setOnClickListener(v->stopLive());
+        setContentView(panel);buttons();
     }
-
-    private File model() { return new File(getFilesDir(), "vocoder.onnx"); }
-    private void show(String message, boolean enable) {
-        runOnUiThread(() -> {
-            if (!closed) { status.setText(message); test.setEnabled(enable); }
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);}
+    private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
+    private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
+    @Override protected void onActivityResult(int request,int result,Intent data){
+        super.onActivityResult(request,result,data);
+        if(request!=17||result!=RESULT_OK||data==null||data.getData()==null||busy)return;
+        Uri uri=data.getData();busy=true;buttons();show("Importing model pack…");
+        worker.execute(()->{
+            try(InputStream in=getContentResolver().openInputStream(uri)){
+                if(in==null)throw new IOException("Cannot open file");
+                ModelPack.importZip(in,modelDir());show("Models imported. Integration is unvalidated; connect headphones before starting.");
+            }catch(Exception e){show("Import failed: "+e);}
+            finally{done();}
         });
     }
-    @Override protected void onActivityResult(int request, int result, Intent data) {
-        super.onActivityResult(request, result, data);
-        if (request != 17 || result != RESULT_OK || data == null || data.getData() == null) return;
-        Uri uri = data.getData();
-        test.setEnabled(false);
-        worker.execute(() -> {
-            File temp = new File(getFilesDir(), "vocoder.tmp");
-            try (InputStream in = getContentResolver().openInputStream(uri);
-                 FileOutputStream out = new FileOutputStream(temp)) {
-                if (in == null) throw new java.io.IOException("Cannot open document");
-                byte[] block = new byte[65536];
-                int n;
-                while ((n = in.read(block)) != -1) out.write(block, 0, n);
-                out.getFD().sync();
-                if (!temp.renameTo(model())) throw new java.io.IOException("Cannot save model");
-                show("Vocoder imported. This does not enable translation.", true);
-            } catch (Exception e) {
-                temp.delete();
-                show("Import failed: " + e.getMessage(), model().isFile());
-            }
+    @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] grants){
+        super.onRequestPermissionsResult(code,permissions,grants);
+        if(code==18&&grants.length>0&&grants[0]==PackageManager.PERMISSION_GRANTED&&!busy)startLive();
+    }
+    private void startLive(){
+        if(busy)return;
+        busy=true;stopRequested=false;buttons();show("Loading four model sessions…");
+        worker.execute(()->{
+            try(StreamingEngine engine=new StreamingEngine(modelDir())){
+                if(stopRequested||closed)return;
+                LiveAudio audio=new LiveAudio(getSystemService(AudioManager.class),this::show);live=audio;
+                if(stopRequested||closed){audio.close();return;}
+                audio.run(engine);show("Stopped.");
+            }catch(Exception|OutOfMemoryError e){show("Stopped: "+e+(e.getCause()==null?"":" — "+e.getCause()));}
+            finally{live=null;done();}
         });
     }
-    private void runVocoder() {
-        test.setEnabled(false);
-        worker.execute(() -> {
-            try (EnglishUnitVocoder vocoder = new EnglishUnitVocoder(model().getAbsolutePath())) {
-                long[] units = new long[50];
-                for (int i = 0; i < units.length; i++) units[i] = 100 + i;
-                float[] pcm = vocoder.decode(units);
-                if (pcm.length == 0) throw new IllegalStateException("No samples returned");
-                if (closed) return;
-                AudioTrack audio = new AudioTrack.Builder()
-                    .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA).build())
-                    .setAudioFormat(new AudioFormat.Builder().setSampleRate(16000)
-                        .setEncoding(AudioFormat.ENCODING_PCM_FLOAT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                    .setBufferSizeInBytes(pcm.length * 4).setTransferMode(AudioTrack.MODE_STATIC).build();
-                track = audio;
-                try {
-                    int written = audio.write(pcm, 0, pcm.length, AudioTrack.WRITE_BLOCKING);
-                    if (written != pcm.length) throw new IllegalStateException("Audio write: " + written);
-                    if (!closed) {
-                        audio.play();
-                        Thread.sleep(Math.min(10000, pcm.length * 1000L / 16000 + 100));
-                    }
-                } finally { track = null; audio.release(); }
-                show("Vocoder returned " + pcm.length + " samples. Synthetic acoustic-unit test only.", true);
-            } catch (Exception e) { show("Vocoder failed: " + e.getMessage(), true); }
-        });
-    }
-    @Override protected void onDestroy() {
-        closed = true;
-        worker.shutdownNow();
-        super.onDestroy();
-    }
+    private void stopLive(){stopRequested=true;LiveAudio audio=live;if(audio!=null)audio.close();}
+    @Override protected void onStop(){stopLive();super.onStop();}
+    @Override protected void onDestroy(){closed=true;stopLive();worker.shutdown();super.onDestroy();}
 }
