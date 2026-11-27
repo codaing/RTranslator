@@ -25,12 +25,11 @@ def main(directory):
     baseline=json.loads((directory/"decoder.incremental.fp32.validated.json").read_text())
     if baseline.get("parity")!="PASS":raise RuntimeError("FP32 incremental parity gate missing")
     prepared=prepare(source)
+    original_locations=set()
     if prepared!=source:
         original=onnx.load(str(source),load_external_data=False)
         original_locations={e.value for t in original.graph.initializer for e in t.external_data if e.key=="location"}
         del original
-        source.unlink(missing_ok=True)
-        for location in original_locations:(directory/location).unlink(missing_ok=True)
     graph=onnx.load(str(prepared),load_external_data=False)
     initializers={t.name:t for t in graph.graph.initializer}
     selected=[];shape_counts={}
@@ -56,7 +55,8 @@ def main(directory):
     locations={e.value for t in graph.graph.initializer for e in t.external_data if e.key=="location"}
     del graph
     prepared.unlink(missing_ok=True)
-    for location in locations:(directory/location).unlink(missing_ok=True)
+    source.unlink(missing_ok=True)
+    for location in (locations|original_locations):(directory/location).unlink(missing_ok=True)
     options=ort.SessionOptions();options.intra_op_num_threads=4;options.inter_op_num_threads=1
     configure_native(options)
     session=ort.InferenceSession(str(output),sess_options=options,providers=["CPUExecutionProvider"])
