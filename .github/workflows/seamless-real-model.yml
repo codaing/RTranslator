@@ -11,6 +11,7 @@ on:
       - 'seamless-port/test_repair_encoder_graph.py'
       - 'seamless-port/shaw_regression.py'
       - 'seamless-port/quantize_int8.py'
+      - 'seamless-port/fold_weights.py'
       - 'seamless-port/model_pack.py'
       - 'seamless-port/speech_smoke.py'
       - 'seamless-port/check_fbank.py'
@@ -80,10 +81,10 @@ jobs:
             model-check/*.txt
           if-no-files-found: warn
       - name: Stage verified model component
-        if: inputs.package_models == true
+        if: inputs.package_models == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package-models]'))
         run: python seamless-port/model_pack.py stage "${{ matrix.component }}" model-check model-part
       - name: Transfer verified model component for integrated test
-        if: inputs.package_models == true
+        if: inputs.package_models == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package-models]'))
         uses: actions/upload-artifact@v4
         with:
           name: model-part-${{ matrix.component }}
@@ -91,7 +92,7 @@ jobs:
           retention-days: 1
           compression-level: 0
   integrated:
-    if: inputs.package_models == true
+    if: inputs.package_models == true || (github.event_name == 'push' && contains(github.event.head_commit.message, '[package-models]'))
     needs: export
     runs-on: ubuntu-22.04
     timeout-minutes: 120

@@ -26,6 +26,10 @@ def quantize(component, directory):
         raise ValueError("No saved FP32 validation fixtures")
     if len(cases) != len(baseline.get("tests", [])):
         raise ValueError("Fixture count differs from FP32 validation report")
+    # The encoder export deliberately disables constant folding. Expose
+    # initializer-backed RHS transposes to ORT without folding activation ops.
+    from fold_weights import prepare
+    source = prepare(source)
     # Do not quantize arbitrary activation-only matrix multiplication.
     quantize_dynamic(
         str(source), str(output), weight_type=QuantType.QInt8,
