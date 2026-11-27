@@ -59,7 +59,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -118,11 +118,33 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
 
     if update_frames<32 or update_frames>160 or update_frames%32:
         raise ValueError("update_frames must be a multiple of 32 between 32 and 160")
+    if encoder_window not in (0,384,768,1152):
+        raise ValueError("unsupported encoder context experiment")
+    if encoder_window and update_frames!=64:
+        raise ValueError("encoder window experiment requires 64-frame cadence")
+    from probe_encoder_context import splice
+    encoder_history=None
+    previous_count=0
+    encoder_frames=0
     end=len(features)&~1
     for count in list(range(192,end,update_frames))+[end]:
         t0=time.monotonic();finished=count==end
         phase_start=time.monotonic()
-        encoded=enc.run(["encoded"],{"fbank":features[None,:count,:]})[0]
+        # Measured stride = 16 raw frames per encoder state. For irregular
+        # EOF use the original full-prefix pass; no uncertain alignment.
+        window_start=max(0,count-encoder_window) if encoder_window and count%16==0 else 0
+        if window_start%16:raise RuntimeError("unaligned encoder window")
+        tail=enc.run(["encoded"],{"fbank":features[None,window_start:count,:]})[0]
+        if window_start:
+            if encoder_history is None or previous_count%16:
+                raise RuntimeError("missing aligned encoder history")
+            expected=encoder_history.shape[1]+(count-previous_count)//16
+            encoded=splice(encoder_history,tail,window_start,128,16,expected)
+        else:
+            encoded=tail
+        encoder_history=encoded
+        previous_count=count
+        encoder_frames+=count-window_start
         enc_elapsed=time.monotonic()-phase_start;phase_totals["encoder_seconds"]+=enc_elapsed
         old=len(tokens);decoder_before=phase_totals["decoder_seconds"]
         units_elapsed=vocoder_elapsed=0.0
@@ -181,7 +203,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
                 duration_start=max(0,len(d)-1)
         step_decoder=phase_totals["decoder_seconds"]-decoder_before
         times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,
-            "encoder_seconds":enc_elapsed,"decoder_seconds":step_decoder,
+            "encoder_seconds":enc_elapsed,"encoder_window_start":window_start,"decoder_seconds":step_decoder,
             "units_seconds":units_elapsed,"vocoder_seconds":vocoder_elapsed,
             "decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
             "tokens":len(tokens)-2,"rss_mib":rss_mib()})
@@ -205,6 +227,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
        "intra_op_threads":threads,"processing_real_time_factor":(elapsed-load_time)/(end/100),
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
+       "encoder_window":encoder_window,"encoder_input_frames":encoder_frames,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
        "first_audio":first_audio,"token_ids":tokens,"steps":times}
@@ -218,4 +241,5 @@ if __name__=="__main__":
     p.add_argument("--session-profile",choices=("default","no-retention","basic-no-retention"),default="default")
     p.add_argument("--source-projections",action="store_true")
     p.add_argument("--threads",type=int,default=4)
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads)
+    p.add_argument("--encoder-window",type=int,default=0,choices=(0,384,768,1152))
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window)
