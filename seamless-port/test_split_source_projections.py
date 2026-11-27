@@ -50,3 +50,52 @@ class SplitSourceTest(unittest.TestCase):
             for name,model in (("source",source),("main",main)):
                 onnx.save_model(model,str(Path(tmp)/(name+".onnx")))
                 onnx.checker.check_model(str(Path(tmp)/(name+".onnx")))
+
+    def test_symbolic_fallback_external_float_bias(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from split_source_projections import infer_types
+        def vi(n):return h.make_tensor_value_info(n,T.FLOAT,[1,"sequence",2])
+        g=h.make_graph([
+            h.make_node("MatMul",["encoded","w"],["projected"]),
+            h.make_node("Add",["projected","bias"],["biased"]),
+            h.make_node("Add",["biased","target"],["y"])],
+            "external_bias",[vi("encoded"),vi("target")],[vi("y")],
+            [nh.from_array(np.eye(2,dtype=np.float32),name="w"),
+             nh.from_array(np.array([1,2],np.float32),name="bias")])
+        m=h.make_model(g,opset_imports=[h.make_opsetid("",17)],ir_version=9)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/"original.onnx"
+            onnx.save_model(m,str(p),save_as_external_data=True,all_tensors_to_one_file=True,
+                location="weights.bin",size_threshold=0)
+            original=onnx.load(str(p),load_external_data=False)
+            def force_fallback(model,base_dir):
+                work,types=infer_types(model,base_dir)
+                types.pop("biased",None)
+                return work,types
+            with patch("split_source_projections.infer_types",side_effect=force_fallback):
+                source,main,report=partition(original,tmp)
+            self.assertEqual(report["boundary"],["biased"])
+            shape=source.graph.output[0].type.tensor_type.shape.dim
+            self.assertEqual(len(shape),3)
+            self.assertEqual(shape[2].dim_value,2)
+            self.assertFalse(shape[1].HasField("dim_value"))
+            self.assertEqual([v.name for v in source.graph.input],["encoded"])
+            self.assertTrue(all(t.data_location==T.EXTERNAL for t in source.graph.initializer))
+            import onnxruntime as ort
+            for name,model in (("source",source),("main",main)):
+                path=Path(tmp)/(name+".onnx")
+                onnx.save_model(model,str(path))
+                onnx.checker.check_model(str(path))
+            def session(name):
+                return ort.InferenceSession(str(Path(tmp)/(name+".onnx")),
+                    providers=["CPUExecutionProvider"])
+            baseline,src,step=map(session,("original","source","main"))
+            for n in (1,5):
+                e=np.arange(n*2,dtype=np.float32).reshape(1,n,2)
+                t=np.ones_like(e)
+                expected=baseline.run(None,{"encoded":e,"target":t})[0]
+                projected=src.run(None,{"encoded":e})[0]
+                actual=step.run(None,{"biased":projected,"target":t})[0]
+                np.testing.assert_array_equal(expected,actual)

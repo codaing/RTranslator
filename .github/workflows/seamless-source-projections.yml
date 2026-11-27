@@ -4,6 +4,9 @@ on:
     branches: [seamless-streaming]
     paths:
       - '.github/workflows/seamless-source-projections.yml'
+      - 'seamless-port/split_source_projections.py'
+      - 'seamless-port/test_split_source_projections.py'
+      - 'seamless-port/compare_source_projections.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -67,7 +70,8 @@ jobs:
       - name: Split source-only projections without copying weights
         run: |
           mkdir -p speech-reports
-          python -u seamless-port/split_source_projections.py models
+          set -o pipefail
+          python -u seamless-port/split_source_projections.py models 2>&1 | tee speech-reports/partition.log
           cp models/decoder.source-projections.json speech-reports/
       - name: Compare same input and model on one runner
         run: |

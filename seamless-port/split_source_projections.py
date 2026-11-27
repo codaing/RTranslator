@@ -103,15 +103,25 @@ def partition(model,base_dir="."):
     if missing:
         print("standard inference missing",missing,flush=True)
         # Isolate the source subgraph, with only the original encoded input.
-        # Symbolic inference works on the unmaterialized large weights; use
-        # inferred rank/dtype only, discard symbolic dimension expressions.
+        # Symbolic inference can attempt to evaluate floating-point weights
+        # (e.g. an Add bias), even when only shapes are needed. Represent all
+        # remaining external initializers as typed inputs in this metadata-only
+        # probe. Small integer shape operands were materialized above.
+        # The real source and decoder graphs retain their original weights.
         from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
         nodes=[work.graph.node[i] for i in sorted(source_needed)]
         used=set().union(*(deps(n) for n in nodes))
         small=copy.deepcopy(work)
-        small.graph.CopyFrom(h.make_graph(nodes,"source_shape_probe",[inputs["encoded"]],
-            [h.make_empty_tensor_value_info(n) for n in boundary],
-            [t for t in work.graph.initializer if t.name in used]))
+        probe_inputs=[inputs["encoded"]]
+        probe_constants=[]
+        for t in work.graph.initializer:
+            if t.name not in used:continue
+            if t.data_location==onnx.TensorProto.EXTERNAL:
+                probe_inputs.append(h.make_tensor_value_info(t.name,t.data_type,list(t.dims)))
+            else:
+                probe_constants.append(t)
+        small.graph.CopyFrom(h.make_graph(nodes,"source_shape_probe",probe_inputs,
+            [h.make_empty_tensor_value_info(n) for n in boundary],probe_constants))
         sym=SymbolicShapeInference.infer_shapes(small,auto_merge=True,guess_output_rank=False)
         for v in list(sym.graph.value_info)+list(sym.graph.output):
             if valid(v) and not valid(types.get(v.name)):
