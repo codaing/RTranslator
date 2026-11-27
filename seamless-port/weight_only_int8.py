@@ -1,6 +1,6 @@
 """Storage INT8, FP32 activation and matrix arithmetic.
 
-Group-wise symmetric weight quantization (64 input weights per output channel).
+Group-wise symmetric weight quantization (16 input weights per output channel).
 Uses standard ONNX DequantizeLinear/Reshape/Transpose, not an Android custom op.
 ORT may expand/pack weights at session creation: compressed storage is not a
 promise of compressed resident memory. The original model remains untouched.
@@ -12,7 +12,7 @@ import onnx
 from onnx import helper as h, numpy_helper as nh, TensorProto as T
 from onnx.external_data_helper import uses_external_data, set_external_data
 
-GROUP=64
+GROUP=16
 
 
 def tensors(graph):

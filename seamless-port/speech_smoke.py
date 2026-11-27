@@ -45,7 +45,12 @@ def run(directory,fbank,out):
     opts.intra_op_num_threads=4
     opts.inter_op_num_threads=1
     start=time.monotonic()
-    enc,dec,unit,voc=[ort.InferenceSession(str(directory/n),opts,providers=["CPUExecutionProvider"])
+    from decoder_session import configure
+    decoder_opts=ort.SessionOptions()
+    decoder_opts.intra_op_num_threads=4
+    decoder_opts.inter_op_num_threads=1
+    configure(decoder_opts)
+    enc,dec,unit,voc=[ort.InferenceSession(str(directory/n),decoder_opts if n=="decoder.int8.onnx" else opts,providers=["CPUExecutionProvider"])
         for n in ("encoder.int8.onnx","decoder.int8.onnx","units.onnx","vocoder.onnx")]
     load_time=time.monotonic()-start
     tokens=list(meta["prefix"])

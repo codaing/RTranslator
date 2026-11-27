@@ -85,15 +85,15 @@ def quantize(component, directory):
     with phase("quantization selection"):
         graph=onnx.load(str(source),load_external_data=False).graph
         entries=select_nodes(graph,component)
-        # Weight-only decoder path currently supports MatMul with groups of 64.
+        # Weight-only decoder path currently supports MatMul with groups of 16.
         matmul_names={n.name for n in graph.node if n.op_type=="MatMul"}
         if component=="decoder":
             for e in entries:
-                e["selected"]=e["selected"] and e["name"] in matmul_names and e["shape"][0]%64==0
+                e["selected"]=e["selected"] and e["name"] in matmul_names and e["shape"][0]%16==0
         selected=[e["name"] for e in entries if e["selected"]]
         if component=="decoder" and (not selected or "" in selected or len(set(selected))!=len(selected)):
             raise RuntimeError("Could not uniquely identify decoder feed-forward projections")
-        policy="ffn-group64-weight-only-fp32-activations" if component=="decoder" else "all-constant-matmul-int8"
+        policy="ffn-group16-weight-only-fp32-activations" if component=="decoder" else "all-constant-matmul-int8"
         summary={"component":component,"precision":"int8-weight-only" if component=="decoder" else "int8-dynamic","policy":policy,"parity":"PENDING",
                  "eligible":len(entries),"selected":len(selected),"node_selection":entries,"tests":[]}
         diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
@@ -103,7 +103,7 @@ def quantize(component, directory):
     if component=="decoder":
         from weight_only_int8 import convert
         with phase("grouped weight-only INT8 conversion"):
-            convert(source,output,selected)
+            convert(source,output,selected,group=16)
     else:
         with phase("ORT dynamic weight quantization"):
             quantize_dynamic(str(source),str(output),weight_type=QuantType.QInt8,
@@ -130,6 +130,9 @@ def quantize(component, directory):
     options=ort.SessionOptions()
     options.intra_op_num_threads=4
     options.inter_op_num_threads=1
+    if component=="decoder":
+        from decoder_session import configure
+        configure(options)
     with phase("CPU session creation"):
         session=ort.InferenceSession(str(output),sess_options=options,providers=["CPUExecutionProvider"])
     summary["session_rss_mib"]=rss_mib()
@@ -165,11 +168,13 @@ def quantize(component, directory):
                     metrics[name].update(read_write_agreement=decision==reference,
                         actual_probability=float(np.min(actual[..., -1,-1])),reference_probability=float(np.min(expected[..., -1,-1])))
                     if decision!=reference:failures.append(f"{case.name}: monotonic read/write decision differs")
-            summary["tests"].append({"fixture":case.name,"seconds":elapsed,"metrics":metrics})
+            summary["tests"].append({"fixture":case.name,"seconds":elapsed,"metrics":metrics,"rss_mib":rss_mib(),"peak_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024})
             summary["failures"]=failures
             print(json.dumps(summary["tests"][-1]),flush=True)
             diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
     summary["parity"]="FAIL" if failures else "PASS"
+    summary["final_rss_mib"]=rss_mib()
+    summary["peak_inference_and_conversion_rss_mib"]=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024
     diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
     if failures:raise RuntimeError("; ".join(failures))
     marker.write_text(json.dumps(summary,indent=2)+"\n")

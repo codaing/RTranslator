@@ -10,10 +10,21 @@ from weight_only_int8 import convert,grouped_weight
 class TestWeightOnly(unittest.TestCase):
     def test_grouped_zeros_and_outliers(self):
         w=np.zeros((128,2),np.float32);w[0,0]=120;w[64:,0]=0.125
-        q,s=grouped_weight(w)
+        q,s=grouped_weight(w,group=64)
         reconstructed=(q.astype(np.float32)*s[:,None]).reshape(2,128).T
         self.assertTrue(np.isfinite(reconstructed).all())
         np.testing.assert_allclose(reconstructed,w,atol=0.001)
+
+    def test_finer_groups_preserve_small_weights_near_outliers(self):
+        w=np.full((64,2),0.125,np.float32)
+        w[0,:]=100
+        def reconstruct(group):
+            q,s=grouped_weight(w,group=group)
+            return (q.astype(np.float32)*s[:,None]).reshape(2,64).T
+        coarse=np.linalg.norm(reconstruct(64)-w)
+        fine=np.linalg.norm(reconstruct(16)-w)
+        self.assertLess(fine,coarse)
+        np.testing.assert_allclose(reconstruct(16)[16:],w[16:],atol=1e-6)
 
     def test_standard_onnx_weight_only_and_external_compaction(self):
         with tempfile.TemporaryDirectory() as tmp:
