@@ -5,7 +5,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 from onnx import helper as h,numpy_helper as nh,TensorProto as T
-from weight_only_int8 import convert,grouped_weight
+from weight_only_int8 import convert,grouped_weight,pack_nbits
 
 class TestWeightOnly(unittest.TestCase):
     def test_grouped_zeros_and_outliers(self):
@@ -53,6 +53,10 @@ class TestWeightOnly(unittest.TestCase):
             expected=x@weight@other
             self.assertLess(np.linalg.norm(actual-expected)/np.linalg.norm(expected),0.03)
 
+    def test_int4_low_nibble_first_packing(self):
+        values=np.array([[0,1,2,3,14,15,8,7]],dtype=np.uint8)
+        np.testing.assert_array_equal(pack_nbits(values,4),np.array([[0x10,0x32,0xFE,0x78]],dtype=np.uint8))
+
     def test_native_graph_preserves_node_outputs_and_compacts_weights(self):
         with tempfile.TemporaryDirectory() as tmp:
             p=Path(tmp);src=p/"source.onnx";out=p/"native.onnx"
@@ -63,12 +67,15 @@ class TestWeightOnly(unittest.TestCase):
             model=h.make_model(graph,opset_imports=[h.make_opsetid("",17)],ir_version=9)
             onnx.save_model(model,str(src))
             for asym in (False,True):
-                convert(src,out,["test"],group=16,native=True,asymmetric=asym)
-                g=onnx.load(str(out),load_external_data=False).graph
-                self.assertEqual(g.node[0].op_type,"MatMulNBits")
-                self.assertEqual(list(g.node[0].output),["y"])
-                self.assertEqual(len(g.node[0].input),4 if asym else 3)
-                self.assertNotIn("w",[t.name for t in g.initializer])
+                for bits in (4,8):
+                    convert(src,out,["test"],group=16,native=True,asymmetric=asym,bits=bits)
+                    g=onnx.load(str(out),load_external_data=False).graph
+                    self.assertEqual(g.node[0].op_type,"MatMulNBits")
+                    self.assertEqual(list(g.node[0].output),["y"])
+                    self.assertEqual(len(g.node[0].input),4 if asym else 3)
+                    attrs={a.name:onnx.helper.get_attribute_value(a) for a in g.node[0].attribute}
+                    self.assertEqual(attrs["bits"],bits)
+                    self.assertNotIn("w",[t.name for t in g.initializer])
 
 if __name__=="__main__":
     unittest.main()

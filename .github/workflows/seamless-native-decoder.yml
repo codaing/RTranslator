@@ -5,6 +5,9 @@ on:
     paths:
       - '.github/workflows/seamless-native-decoder.yml'
       - 'seamless-port/native8_probe.py'
+      - 'seamless-port/native4_probe.py'
+      - 'seamless-port/quantize_int8.py'
+      - 'seamless-port/test_weight_only_int8.py'
       - 'seamless-port/weight_only_int8.py'
   workflow_dispatch:
 permissions:
@@ -55,6 +58,35 @@ jobs:
             rm -f model-check/decoder.native8-*.onnx model-check/decoder.native8-*.onnx.weights
           done
           test "$passed" = 1
+      - name: Probe native packed INT4 runtime
+        run: python -u seamless-port/native4_probe.py
+      - name: Evaluate native decoder INT4 candidates
+        id: int4
+        run: |
+          passed=0
+          for subset in all output_proj inner_proj; do
+            args=(--native --asymmetric --bits 4)
+            if [[ "$subset" != all ]]; then args+=(--subset "$subset"); fi
+            if python -u seamless-port/quantize_int8.py decoder model-check "${args[@]}" 2>&1 | tee "model-check/native4-$subset.log"; then
+              passed=1
+              echo "subset=$subset" >> "$GITHUB_OUTPUT"
+              break
+            fi
+            rm -f model-check/decoder.native4-*.onnx model-check/decoder.native4-*.onnx.weights
+          done
+          echo "validated=$passed" >> "$GITHUB_OUTPUT"
+          test "$passed" = 1
+      - name: Upload validated native INT4 decoder candidate
+        if: steps.int4.outputs.validated == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: seamless-decoder-native-int4-experiment
+          path: |
+            model-check/decoder.native4-*.onnx
+            model-check/decoder.native4-*.onnx.weights
+            model-check/decoder.native4-*.validated.json
+          compression-level: 0
+          retention-days: 3
       - name: Upload numerical and memory reports
         if: always()
         uses: actions/upload-artifact@v4

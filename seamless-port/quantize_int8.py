@@ -59,7 +59,7 @@ def select_nodes(graph,component):
     return entries
 
 
-def quantize(component, directory, native=False, asymmetric=False, subset="all"):
+def quantize(component, directory, native=False, asymmetric=False, subset="all", bits=8):
     import numpy as np
     import onnx
     import onnxruntime as ort
@@ -69,7 +69,9 @@ def quantize(component, directory, native=False, asymmetric=False, subset="all")
     source = directory / f"{component}.onnx"
     report = directory / f"{component}.validated.json"
     if native and component!="decoder":raise ValueError("native experiment is decoder only")
-    suffix=("native8-"+("asymmetric" if asymmetric else "symmetric")+"-"+subset) if native else "int8"
+    if native and bits not in (4,8):raise ValueError("native decoder supports 4/8-bit only")
+    if not native and bits!=8:raise ValueError("non-native path supports INT8 only")
+    suffix=(f"native{bits}-"+("asymmetric" if asymmetric else "symmetric")+"-"+subset) if native else "int8"
     output=directory/f"{component}.{suffix}.onnx"
     marker=directory/f"{component}.{suffix}.validated.json"
     diagnostics=directory/f"{component}.{suffix}.diagnostics.json"
@@ -99,8 +101,8 @@ def quantize(component, directory, native=False, asymmetric=False, subset="all")
         if component=="decoder" and (not selected or "" in selected or len(set(selected))!=len(selected)):
             raise RuntimeError("Could not uniquely identify decoder feed-forward projections")
         policy="ffn-group16-weight-only-fp32-activations" if component=="decoder" else "all-constant-matmul-int8"
-        if native:policy="native8-group16-"+("asymmetric" if asymmetric else "symmetric")+"-"+subset
-        summary={"component":component,"precision":"int8-native-experimental" if native else ("int8-weight-only" if component=="decoder" else "int8-dynamic"),"policy":policy,"parity":"PENDING",
+        if native:policy=f"native{bits}-group16-"+("asymmetric" if asymmetric else "symmetric")+"-"+subset
+        summary={"component":component,"precision":f"int{bits}-native-experimental" if native else ("int8-weight-only" if component=="decoder" else "int8-dynamic"),"policy":policy,"bits":bits,"parity":"PENDING",
                  "eligible":len(entries),"selected":len(selected),"node_selection":entries,"tests":[]}
         diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
         print(f"Policy={policy} selected={len(selected)}/{len(entries)} matrix ops; "
@@ -108,8 +110,8 @@ def quantize(component, directory, native=False, asymmetric=False, subset="all")
         del graph
     if component=="decoder":
         from weight_only_int8 import convert
-        with phase("grouped weight-only INT8 conversion"):
-            convert(source,output,selected,group=16,native=native,asymmetric=asymmetric)
+        with phase(f"grouped weight-only INT{bits} conversion"):
+            convert(source,output,selected,group=16,native=native,asymmetric=asymmetric,bits=bits)
     else:
         with phase("ORT dynamic weight quantization"):
             quantize_dynamic(str(source),str(output),weight_type=QuantType.QInt8,
@@ -128,6 +130,9 @@ def quantize(component, directory, native=False, asymmetric=False, subset="all")
             quantized_ops=sum(n.op_type in integer_ops[:4] for n in graph.graph.node)
         if not quantized_ops:raise RuntimeError("No INT8 weight operations produced")
         summary["quantized_ops"]=quantized_ops
+        summary["onnx_graph_bytes"]=output.stat().st_size
+        external_weights=output.parent/(output.name+".weights")
+        summary["external_weight_bytes"]=external_weights.stat().st_size if external_weights.exists() else 0
         summary["initializer_bytes_by_dtype"]={}
         for t in graph.graph.initializer:
             key=onnx.TensorProto.DataType.Name(t.data_type)
@@ -200,8 +205,9 @@ def main():
     p.add_argument("--native",action="store_true")
     p.add_argument("--asymmetric",action="store_true")
     p.add_argument("--subset",choices=("all","inner_proj","output_proj"),default="all")
+    p.add_argument("--bits",type=int,choices=(4,8),default=8,help="native decoder weight bit width; non-native remains INT8")
     args=p.parse_args()
-    print(quantize(args.component,args.directory,native=args.native,asymmetric=args.asymmetric,subset=args.subset))
+    print(quantize(args.component,args.directory,native=args.native,asymmetric=args.asymmetric,subset=args.subset,bits=args.bits))
 
 
 if __name__=="__main__":

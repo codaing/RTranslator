@@ -1,9 +1,8 @@
-"""Storage INT8, FP32 activation and matrix arithmetic.
+"""Group-wise weight-only 4/8-bit MatMulNBits conversion.
 
-Group-wise symmetric weight quantization (16 input weights per output channel).
-Uses standard ONNX DequantizeLinear/Reshape/Transpose, not an Android custom op.
-ORT may expand/pack weights at session creation: compressed storage is not a
-promise of compressed resident memory. The original model remains untouched.
+FP32 activations are retained. External weights are compacted into one file.
+Compressed storage is not a promise of compressed resident memory or faster
+inference; ONNX Runtime may unpack or use a slower kernel on a given CPU.
 """
 import math
 from pathlib import Path
@@ -42,8 +41,23 @@ def grouped_weight(weight,group=GROUP):
     return quantized,scale
 
 
-def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
+def pack_nbits(values,bits):
+    """Pack low-order element in the low nibble/byte, matching ORT MatMulNBits."""
+    values=np.asarray(values,dtype=np.uint8)
+    if bits not in (4,8):raise ValueError("only 4-bit and 8-bit packing is supported")
+    per_byte=8//bits
+    if values.shape[-1]%per_byte:
+        pad=per_byte-(values.shape[-1]%per_byte)
+        values=np.pad(values,[(0,0)]*(values.ndim-1)+[(0,pad)])
+    if bits==8:return values.copy()
+    return ((values[...,0::2]&0x0F)|((values[...,1::2]&0x0F)<<4)).astype(np.uint8)
+
+
+def convert(source,output,selected,group=GROUP,native=False,asymmetric=False,bits=8):
     source,output=Path(source),Path(output)
+    if native and bits not in (4,8):raise ValueError("native MatMulNBits supports only 4/8-bit here")
+    if not native and bits!=8:raise ValueError("standard QDQ conversion remains INT8 only")
+    if not native and asymmetric:raise ValueError("asymmetric flag applies to native MatMulNBits only")
     model=onnx.load(str(source),load_external_data=False)
     graph=model.graph
     if native and not any(o.domain=="com.microsoft" for o in model.opset_import):
@@ -90,25 +104,36 @@ def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
                     k,nout=weight.shape
                     if asymmetric:
                         blocks=np.ascontiguousarray(weight.T).reshape(-1,group)
+                        qmax=(1<<bits)-1
                         lo=np.minimum(blocks.min(axis=1),0)
                         hi=np.maximum(blocks.max(axis=1),0)
-                        s=(hi-lo)/np.float32(255)
+                        s=(hi-lo)/np.float32(qmax)
                         s=np.where(s>0,s,np.float32(1)).astype(np.float32)
-                        z=np.clip(np.rint(-lo/s),0,255).astype(np.uint8)
-                        q=np.clip(np.rint(blocks/s[:,None])+z[:,None].astype(np.float32),0,255).astype(np.uint8)
+                        z=np.clip(np.rint(-lo/s),0,qmax).astype(np.uint8)
+                        q=np.clip(np.rint(blocks/s[:,None])+z[:,None].astype(np.float32),0,qmax).astype(np.uint8)
                         del blocks,lo,hi
-                    else:
+                    elif bits==8:
                         q,s=grouped_weight(weight,group)
                         q=(q.astype(np.int16)+128).astype(np.uint8)
                         z=None
+                    else:
+                        blocks=np.ascontiguousarray(weight.T).reshape(-1,group)
+                        max_abs=np.max(np.abs(blocks),axis=1)
+                        s=np.where(max_abs>0,max_abs/np.float32(8),np.float32(1)).astype(np.float32)
+                        signed=np.clip(np.rint(blocks/s[:,None]),-8,7).astype(np.int8)
+                        q=(signed.astype(np.int16)+8).astype(np.uint8)
+                        z=None
+                        del blocks,max_abs,signed
                     qn,sn,zn=[tag+x for x in ("/packed","/scale","/zero")]
                     if any(x in names for x in (qn,sn,zn)):raise ValueError("name collision")
-                    append_array(qn,q.reshape(nout,k//group,group))
+                    q=pack_nbits(q.reshape(nout,k//group,group),bits)
+                    append_array(qn,q)
                     append_array(sn,s.reshape(-1))
                     extra=[qn,sn]
                     if z is not None:
-                        append_array(zn,z.reshape(-1));extra.append(zn)
-                    native_inputs[weight_name]=(extra,k,nout)
+                        z=pack_nbits(z.reshape(nout,k//group),bits)
+                        append_array(zn,z);extra.append(zn)
+                    native_inputs[weight_name]=(extra,k,nout,bits)
                     replacements[weight_name]=qn
                     del weight,q,s,z
                 else:
@@ -125,9 +150,9 @@ def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
                     replacements[weight_name]=restored
                     del weight,q,s
             if native:
-                extra,k,nout=native_inputs[weight_name]
+                extra,k,nout,node_bits=native_inputs[weight_name]
                 new_nodes.append(h.make_node("MatMulNBits",[n.input[0]]+extra,list(n.output),
-                    domain="com.microsoft",name=n.name,K=k,N=nout,bits=8,block_size=group,accuracy_level=0))
+                    domain="com.microsoft",name=n.name,K=k,N=nout,bits=node_bits,block_size=group,accuracy_level=0))
             else:
                 n.input[1]=replacements[weight_name]
                 new_nodes.append(n)
@@ -160,5 +185,5 @@ def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
     del graph.value_info[:]
     onnx.save_model(model,str(output))
     onnx.checker.check_model(str(output))
-    print(f"Weight-only INT8: {len(replacements)} weight tensors, group={group}, external bytes={(output.parent/data_name).stat().st_size}",flush=True)
+    print(f"Weight-only native INT{bits}: {len(replacements)} weight tensors, group={group}, external bytes={(output.parent/data_name).stat().st_size}",flush=True)
     return len(replacements)
