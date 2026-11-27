@@ -1,0 +1,66 @@
+name: Native ARM64 encoder context and prefix drift probe
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-encoder-context.yml'
+      - 'seamless-port/probe_encoder_context.py'
+      - 'seamless-port/test_encoder_context.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-model-pack
+          path: base-artifact
+          run-id: '46002703236'
+          github-token: ${{ github.token }}
+      - name: Extract encoder only
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          INNER=$(find base-artifact -name 'seamless-incremental-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          unzip -q "$INNER" 'encoder*' -d models
+          rm -rf base-artifact
+          ls -lh models
+      - name: Prepare speech and feature fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python seamless-port/audio_fixture.py speech-input
+          # Repeat the pinned speech sample to exercise longer contexts.
+          # Not an independent lecture or a translation-quality fixture.
+          cat speech-input/mandarin.pcm speech-input/mandarin.pcm > speech-input/long.pcm
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/long.pcm speech-input/fbank.bin
+          sha256sum speech-input/fbank.bin
+      - name: Run diagnostic
+        run: |
+          python -m pip install 'numpy==1.26.4' 'onnxruntime==1.30.0'
+          python -m unittest discover -s seamless-port -p test_encoder_context.py
+          mkdir -p reports
+          set -o pipefail
+          python -u seamless-port/probe_encoder_context.py models/encoder.int8.onnx speech-input/fbank.bin reports/encoder-context.json | tee reports/encoder-context.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Seamless-encoder-context-diagnostics
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7

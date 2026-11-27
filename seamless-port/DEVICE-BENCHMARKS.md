@@ -38,3 +38,7 @@ Quiet CPU remains off. Encoder + prefill 68.1% of normal wall time. Even removin
 ## Native ARM64 projection cache (not a phone benchmark)
 
 Run 46082615070, commit 47fe2eb: 144 source-only MatMul/Gemm operations, 72 projection boundaries. Processing RTF 3.228079 -> 2.918371 (9.6% lower); accepted tokens, prefill decisions, duration identical; PCM NRMS 0.0. One synthetic Mandarin speech fixture, one pair of measurements. Candidate peak RSS 4224.85 MiB. Do not infer Android speed or general translation quality. Optional Android projected model pack shares external decoder weights and keeps native projection results alive only within each source update; legacy packages remain supported. Android fixture and separate host-gated package must pass before physical device testing.
+
+Second native ARM64 source projection run 46083582838 passed: processing RTF 3.122283 -> 2.919721 (6.5% lower); peak RSS 4443.30 -> 4201.98 MiB; exact token, decision, duration and PCM parity. Artifact 15238212593 (3.73 GB ZIP) and APK run 46083594265 artifact 15238586622 (all eight synthetic instrumentation tests passed). Physical-device speed is unverified.
+
+Next encoder investigation: measure actual prefix drift and simulate aligned overlapping windows (3.84, 7.68, 11.52 seconds, 1.28 s guard), retaining old encoder states instead of discarding speech. This is an approximation diagnostic, not a true layer KV cache or a quality gate. No Android changes or candidate model packaging from this probe. Repeated pinned speech is not a mathematics lecture dataset.
