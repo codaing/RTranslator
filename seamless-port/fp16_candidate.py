@@ -31,10 +31,18 @@ def main(component,directory):
         result["fp32_bytes"]=source.stat().st_size+sum((directory/x).stat().st_size for x in base_locations)
         del base_graph
         model=onnx.load(str(source),load_external_data=True)
-        # Preserve fused scaled-dot-product attention subgraphs in FP32. The
-        # generic converter otherwise half-converts one MatMul operand while
-        # leaving its paired operand FP32, which makes the ONNX graph invalid.
-        blocked=[n.name for n in model.graph.node if "/sdpa/" in n.name.lower()]
+        # Preserve fused scaled-dot-product attention subgraphs in FP32.
+        # SDPA nodes can be nested inside graph-valued attributes, so walk the
+        # whole graph tree rather than only the top-level node list.
+        def walk(graph):
+            for node in graph.node:
+                yield node
+                for attr in node.attribute:
+                    if attr.type==onnx.AttributeProto.GRAPH:
+                        yield from walk(attr.g)
+                    elif attr.type==onnx.AttributeProto.GRAPHS:
+                        for subgraph in attr.graphs:yield from walk(subgraph)
+        blocked=[n.name for n in walk(model.graph) if "/sdpa/" in n.name.lower()]
         result["blocked_sdpa_nodes"]=len(blocked)
         start=time.monotonic()
         model=convert_float_to_float16(model,keep_io_types=True,disable_shape_infer=True,
