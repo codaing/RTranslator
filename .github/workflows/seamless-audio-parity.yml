@@ -1,0 +1,45 @@
+name: Seamless Java audio frontend parity
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless/src/main/java/nie/translator/seamless/StreamingFbank.java'
+      - 'seamless-port/FbankCli.java'
+      - 'seamless-port/check_fbank.py'
+      - 'seamless-port/audio_fixture.py'
+      - '.github/workflows/seamless-audio-parity.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  parity:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install 'numpy<2' 'torch==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+      - name: Compare actual Java features on pinned speech
+        run: |
+          mkdir -p speech-reports java-out
+          python seamless-port/audio_fixture.py speech-input
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          python seamless-port/check_fbank.py speech-input/mandarin.pcm speech-input/fbank.bin speech-reports/fbank.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-fbank-parity
+          path: speech-reports/
+          if-no-files-found: warn
