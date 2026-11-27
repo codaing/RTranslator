@@ -8,6 +8,7 @@ import types
 import torch
 from fairseq2.nn.transformer.shaw_attention import ShawRelativePositionSDPA
 from fairseq2.nn.transformer.attention_mask import CustomAttentionMask
+from sdpa_export import axis, mask_tensor, attention
 
 
 def forward(self, seqs, keys, key_padding_mask, values, *,
@@ -15,20 +16,19 @@ def forward(self, seqs, keys, key_padding_mask, values, *,
     # The Seamless streaming Conformer uses no relative value embedding.
     if self.rel_v_embed is not None:
         raise NotImplementedError("Relative value embeddings require a separate export")
-    q = torch.arange(seqs.size(2), device=seqs.device) + keys.size(2) - seqs.size(2)
-    k = torch.arange(keys.size(2), device=keys.device)
+    q = axis(seqs, 2) + torch._shape_as_tensor(keys)[2] - torch._shape_as_tensor(seqs)[2]
+    k = axis(keys, 2)
     indices = (k[None, :] - q[:, None]).clamp(
         -self.max_left_rel_pos, self.max_right_rel_pos) + self.max_left_rel_pos
     table = self.rel_k_embed.weight
     scores = torch.matmul(seqs, table.transpose(0, 1))
-    indices = indices.unsqueeze(0).unsqueeze(0).expand(
-        seqs.size(0), seqs.size(1), -1, -1)
+    # Expand from actual score tensor shapes rather than traced Python dimensions.
+    indices = indices[None, None, :, :] + torch.zeros_like(scores[..., :1], dtype=torch.long)
     relative = torch.gather(scores, -1, indices) * (seqs.size(-1) ** -0.5)
     if attn_mask is not None:
-        relative = relative + attn_mask.materialize()
-    return self.inner_sdpa(seqs, keys, key_padding_mask, values,
-                           attn_mask=CustomAttentionMask(relative),
-                           needs_weights=needs_weights)
+        relative = relative + mask_tensor(attn_mask, seqs, keys)
+    return attention(seqs, keys, values, key_padding_mask,
+                     CustomAttentionMask(relative), needs_weights)
 
 
 def patch_shaw_attention(model):

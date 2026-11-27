@@ -5,6 +5,7 @@ on:
     paths:
       - 'seamless-port/export*.py'
       - 'seamless-port/shaw_export.py'
+      - 'seamless-port/sdpa_export.py'
       - 'seamless-port/quantize_int8.py'
       - '.github/workflows/seamless-real-model.yml'
   workflow_dispatch:

@@ -35,7 +35,9 @@ class Units(nn.Module):
         seqs, padding, durations = front.variance_adaptor(
             seqs, None, duration_factor=1.0, min_duration=1)
         seqs = front.forward_unit_pos_embedding(seqs, padding)
-        seqs, _ = model.decoder(seqs, padding, film_cond_emb=None)
+        # Batch one: duration expansion contains exactly the valid unit frames.
+        # No padded keys exist, so avoid a redundant traced padding mask.
+        seqs, _ = model.decoder(seqs, None, film_cond_emb=None)
         logits = model.project(seqs).logits
         return logits, durations
 
@@ -73,6 +75,8 @@ def main():
         front = model.decoder_frontend
         front.char_length_regulator = DynamicUpsampling()
         front.variance_adaptor.length_regulator = DynamicUpsampling()
+        from sdpa_export import patch_sdpa
+        patch_sdpa(model)
         wrapper = Units(model).eval()
         names = ["features", "chars", "char_lens"]
         outputs = ["logits", "durations"]

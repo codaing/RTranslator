@@ -68,7 +68,7 @@ def main():
         names = ["fbank"]
         outputs = ["encoded"]
         axes = {"fbank": {1: "frames"}, "encoded": {1: "encoded_frames"}}
-        examples = [(torch.randn(1, n, 80),) for n in (192, 256, 384)]
+        examples = [(torch.randn(1, n, 80),) for n in (192, 256, 384, 512, 194)]
     else:
         from seamless_communication.models.monotonic_decoder import load_monotonic_decoder_model
         from seamless_communication.models.unity import load_unity_text_tokenizer
@@ -105,7 +105,9 @@ def main():
         references = [wrapper(*inputs) for inputs in examples]
         if args.component == "encoder":
             from shaw_export import patch_shaw_attention
+            from sdpa_export import patch_sdpa
             patch_shaw_attention(model)
+            patch_sdpa(model)
             for inputs, expected in zip(examples, references):
                 torch.testing.assert_close(wrapper(*inputs), expected, rtol=0.002, atol=0.0002)
         torch.onnx.export(wrapper, examples[0], str(model_path), input_names=names,
