@@ -1,0 +1,59 @@
+name: Seamless real checkpoint export and INT8 validation
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless-port/export*.py'
+      - 'seamless-port/quantize_int8.py'
+      - '.github/workflows/seamless-real-model.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        component: [vocoder, encoder, decoder, units]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install historical reference runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 ffmpeg
+          python -m pip install 'numpy<2' 'torch==2.1.1' 'torchaudio==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless 'numpy<2' 'onnx==1.16.2' 'onnxruntime==1.18.1'
+          python -c 'import torch, fairseq2; print(torch.__version__, fairseq2.__version__)'
+      - name: Export actual checkpoint and compare with PyTorch
+        shell: bash
+        run: |
+          mkdir -p model-check
+          if [[ "${{ matrix.component }}" == units ]]; then
+            python seamless-port/export_units.py model-check 2>&1 | tee model-check/export.log
+          else
+            python seamless-port/export_components.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/export.log
+          fi
+          test -s "model-check/${{ matrix.component }}.validated.json"
+      - name: Quantize and compare INT8
+        if: matrix.component == 'encoder' || matrix.component == 'decoder'
+        run: |
+          python seamless-port/quantize_int8.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/int8.log
+          test -s "model-check/${{ matrix.component }}.int8.validated.json"
+      - name: Upload model validation reports (not weights)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-${{ matrix.component }}-reports
+          path: |
+            model-check/*.json
+            model-check/*.log
+          if-no-files-found: warn
