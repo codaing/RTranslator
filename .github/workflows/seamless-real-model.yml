@@ -11,6 +11,8 @@ on:
       - 'seamless-port/test_repair_encoder_graph.py'
       - 'seamless-port/shaw_regression.py'
       - 'seamless-port/quantize_int8.py'
+      - 'seamless-port/weight_only_int8.py'
+      - 'seamless-port/test_weight_only_int8.py'
       - 'seamless-port/fold_weights.py'
       - 'seamless-port/model_pack.py'
       - 'seamless-port/speech_smoke.py'
@@ -65,7 +67,7 @@ jobs:
             python seamless-port/export_components.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/export.log
           fi
           test -s "model-check/${{ matrix.component }}.validated.json"
-      - name: Quantize and compare INT8
+      - name: Quantize and compare INT8 (decoder weight-only)
         timeout-minutes: 100
         if: matrix.component == 'encoder' || matrix.component == 'decoder'
         run: |

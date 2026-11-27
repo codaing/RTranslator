@@ -15,7 +15,7 @@ NOTICE="""SeamlessStreaming model weights: Meta Platforms, Inc.
 Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.
 Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
 Source: https://github.com/facebookresearch/seamless_communication
-Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and selective mixed-precision decoder projections.
+Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and grouped weight-only INT8 decoder feed-forward projections with floating-point activations.
 Noncommercial use only. Experimental conversion; no warranty.
 """
 
@@ -57,7 +57,7 @@ def stage(component,source,destination):
     name=NAMES[component]
     marker=source/(name.removesuffix(".onnx")+".validated.json")
     report=json.loads(marker.read_text())
-    expected="int8-dynamic" if component in ("encoder","decoder") else "fp32"
+    expected={"encoder":"int8-dynamic","decoder":"int8-weight-only"}.get(component,"fp32")
     if report.get("component")!=component or report.get("parity")!="PASS" or report.get("precision")!=expected:
         raise ValueError(f"missing validated {component} {expected}")
     graph=onnx.load(str(source/name),load_external_data=False)

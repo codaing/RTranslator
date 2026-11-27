@@ -85,30 +85,41 @@ def quantize(component, directory):
     with phase("quantization selection"):
         graph=onnx.load(str(source),load_external_data=False).graph
         entries=select_nodes(graph,component)
+        # Weight-only decoder path currently supports MatMul with groups of 64.
+        matmul_names={n.name for n in graph.node if n.op_type=="MatMul"}
+        if component=="decoder":
+            for e in entries:
+                e["selected"]=e["selected"] and e["name"] in matmul_names and e["shape"][0]%64==0
         selected=[e["name"] for e in entries if e["selected"]]
         if component=="decoder" and (not selected or "" in selected or len(set(selected))!=len(selected)):
             raise RuntimeError("Could not uniquely identify decoder feed-forward projections")
-        policy="ffn-only-mixed-fp32-int8" if component=="decoder" else "all-constant-matmul-int8"
-        summary={"component":component,"precision":"int8-dynamic","policy":policy,"parity":"PENDING",
+        policy="ffn-group64-weight-only-fp32-activations" if component=="decoder" else "all-constant-matmul-int8"
+        summary={"component":component,"precision":"int8-weight-only" if component=="decoder" else "int8-dynamic","policy":policy,"parity":"PENDING",
                  "eligible":len(entries),"selected":len(selected),"node_selection":entries,"tests":[]}
         diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
         print(f"Policy={policy} selected={len(selected)}/{len(entries)} matrix ops; "
               f"selected weight elements={sum(e['elements'] for e in entries if e['selected']):,}",flush=True)
         del graph
-    with phase("ORT dynamic weight quantization"):
-        quantize_dynamic(str(source),str(output),weight_type=QuantType.QInt8,
-            per_channel=True,op_types_to_quantize=["MatMul","Gemm"],
-            nodes_to_quantize=selected if component=="decoder" else None,
-            extra_options={"MatMulConstBOnly":True},use_external_data_format=True)
+    if component=="decoder":
+        from weight_only_int8 import convert
+        with phase("grouped weight-only INT8 conversion"):
+            convert(source,output,selected)
+    else:
+        with phase("ORT dynamic weight quantization"):
+            quantize_dynamic(str(source),str(output),weight_type=QuantType.QInt8,
+                per_channel=True,op_types_to_quantize=["MatMul","Gemm"],
+                extra_options={"MatMulConstBOnly":True},use_external_data_format=True)
     with phase("ONNX checker and graph inspection"):
         onnx.checker.check_model(str(output))
         graph=onnx.load(str(output),load_external_data=False)
-        quantized_ops=sum(n.op_type in ("MatMulInteger","QLinearMatMul","DynamicQuantizeMatMul","QGemm") for n in graph.graph.node)
-        if not quantized_ops:raise RuntimeError("No INT8 matrix multiplications produced")
+        integer_ops=("MatMulInteger","QLinearMatMul","DynamicQuantizeMatMul","QGemm","DynamicQuantizeLinear","QuantizeLinear")
         if component=="decoder":
-            actual=[n.name for n in graph.graph.node if n.op_type in ("MatMulInteger","QLinearMatMul","DynamicQuantizeMatMul","QGemm")]
-            if any(not any(name==s or name.startswith(s+"_") for s in selected) for name in actual):
-                raise RuntimeError("INT8 operation outside decoder allowlist")
+            if any(n.op_type in integer_ops for n in graph.graph.node):
+                raise RuntimeError("unexpected activation quantization in weight-only graph")
+            quantized_ops=sum(n.op_type=="DequantizeLinear" and n.name.startswith("weight_only/") for n in graph.graph.node)
+        else:
+            quantized_ops=sum(n.op_type in integer_ops[:4] for n in graph.graph.node)
+        if not quantized_ops:raise RuntimeError("No INT8 weight operations produced")
         summary["quantized_ops"]=quantized_ops
         summary["initializer_bytes_by_dtype"]={}
         for t in graph.graph.initializer:
@@ -121,6 +132,9 @@ def quantize(component, directory):
     options.inter_op_num_threads=1
     with phase("CPU session creation"):
         session=ort.InferenceSession(str(output),sess_options=options,providers=["CPUExecutionProvider"])
+    summary["session_rss_mib"]=rss_mib()
+    summary["peak_conversion_rss_mib"]=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024
+    diagnostics.write_text(json.dumps(summary,indent=2)+"\n")
     failures=[]
     for case in cases:
         with phase("fixture "+case.name),np.load(case,allow_pickle=False) as fixture:
