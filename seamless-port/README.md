@@ -65,3 +65,7 @@ Remaining work, in order:
 5. Replace the UI/model downloader with a single Mandarin-to-English mic/headset screen only once the above runs locally; then remove legacy ASR/translation/TTS on this branch.
 
 No model weights are committed. No backend server, network inference, or fallback TTS is included in this work. No successful model export or Android performance claim is made yet.
+
+## Dedicated Android test module
+
+`:seamless` now builds a separate application (nie.translator.seamless) with only ONNX Runtime, no legacy model downloader/TTS/Whisper code, compressed JNI libraries and ARM64 packaging. It imports a standalone vocoder and plays synthetic acoustic units. It is explicitly not a translator yet. The APK workflow checks ELF/ZIP alignment, installs on Android 16 and runs a real Android ONNX interface test using a tiny synthetic graph. The emulator test does not prove model translation or 16 KB physical-device runtime compatibility.

@@ -1,89 +1,46 @@
-name: Build Seamless port experimental APK
-
+name: Build minimal Seamless port and runtime test
 on:
-  workflow_dispatch:
   push:
     branches: [seamless-streaming]
-
+  workflow_dispatch:
 permissions:
   contents: read
-
 jobs:
   apk:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
-      - name: Checkout source and native dependencies
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          lfs: true
-      - name: Java 17
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
-      - name: Install Android SDK, NDK and CMake
-        shell: bash
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install tools and create test fixture
         run: |
-          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          # yes receives SIGPIPE when sdkmanager exits; preserve sdkmanager status.
-          set +o pipefail
-          yes | "$SDKMANAGER" --licenses > /dev/null
-          set -o pipefail
-          "$SDKMANAGER" "platforms;android-36" "build-tools;34.0.0" "build-tools;36.0.0" "ndk;28.0.12674087" "cmake;3.22.1"
-      - name: Build ARM64 release APK
-        run: bash ./gradlew :app:assembleRelease --stacktrace --no-daemon
-      - name: APK install compatibility report
-        shell: bash
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "build-tools;34.0.0"
+          python -m pip install 'numpy<2' 'onnx==1.16.2'
+          python seamless-port/make_android_fixture.py
+      - name: Build minimal APK and instrumentation tests
+        run: bash ./gradlew :seamless:assembleRelease :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon
+      - name: Verify APK and native library packaging
         run: |
           mkdir -p install-diagnostics
-          APK=app/build/outputs/apk/release/app-release.apk
+          APK=seamless/build/outputs/apk/release/seamless-release.apk
           TOOLS="$ANDROID_HOME/build-tools/36.0.0"
-          OBJDUMP="$ANDROID_HOME/ndk/28.0.12674087/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump"
-          {
-            echo "=== APK size and SHA-256 ==="
-            ls -lh "$APK"
-            sha256sum "$APK"
-            echo "=== APK ZIP integrity ==="
-            unzip -tq "$APK"
-            echo "=== Package, SDK, ABIs and features ==="
-            "$TOOLS/aapt" dump badging "$APK"
-            echo "=== Manifest ==="
-            "$TOOLS/aapt" dump xmltree "$APK" AndroidManifest.xml
-            echo "=== APK signing verification ==="
-            "$TOOLS/apksigner" verify --verbose --print-certs "$APK"
-            echo "=== 16 KB ZIP alignment ==="
-            if "$TOOLS/zipalign" -c -P 16 -v 4 "$APK" > install-diagnostics/zipalign.txt 2>&1; then
-              echo "ZIP_ALIGNMENT_16K=PASS"
-            else
-              echo "ZIP_ALIGNMENT_16K=FAIL"
-              tail -n 30 install-diagnostics/zipalign.txt
-              echo "::warning::APK did not pass 16 KB ZIP alignment"
-            fi
-            echo "=== Native library ELF LOAD segment alignment ==="
-            unzip -q "$APK" 'lib/*/*.so' -d install-diagnostics/native
-            while IFS= read -r -d '' lib; do
-              echo "$lib"
-              "$OBJDUMP" -p "$lib" | grep LOAD || true
-            done < <(find install-diagnostics/native -type f -name '*.so' -print0 | sort -z)
-            rm -rf install-diagnostics/native
-          } 2>&1 | tee install-diagnostics/apk-report.txt
-          {
-            echo '### APK compatibility report'
-            echo '~~~text'
-            grep -E '^(package:|sdkVersion:|targetSdkVersion:|native-code:|ZIP_ALIGNMENT_16K=|Signer #1 certificate SHA-256 digest:)' install-diagnostics/apk-report.txt || true
-            echo '~~~'
-          } >> "$GITHUB_STEP_SUMMARY"
-      - name: Enable KVM for emulator
+          "$TOOLS/apksigner" verify --verbose --print-certs "$APK" | tee install-diagnostics/signature.txt
+          "$TOOLS/aapt" dump badging "$APK" | tee install-diagnostics/badging.txt
+          "$TOOLS/zipalign" -c -P 16 -v 4 "$APK" > install-diagnostics/zipalign.txt
+          python seamless-port/check_native.py "$APK" | tee install-diagnostics/native.txt
+      - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
-      - name: Clean Android 16 installation test
-        id: emulator_install
+      - name: Install release and execute ONNX instrumentation
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 36
@@ -91,28 +48,17 @@ jobs:
           arch: x86_64
           profile: pixel_6
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
-          disable-animations: true
           emulator-boot-timeout: 600
-          script: bash .github/scripts/check-apk-install.sh
-      - name: Report emulator result
-        if: always()
-        run: |
-          echo "Android emulator install step: ${{ steps.emulator_install.outcome }}" >> "$GITHUB_STEP_SUMMARY"
-          if test -f install-diagnostics/emulator-install.txt; then
-            echo '~~~text' >> "$GITHUB_STEP_SUMMARY"
-            tail -n 40 install-diagnostics/emulator-install.txt >> "$GITHUB_STEP_SUMMARY"
-            echo '~~~' >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: Upload install diagnostics
+          script: bash seamless-port/android_test.sh
+      - name: Upload reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: APK-install-diagnostics
+          name: seamless-test-reports
           path: install-diagnostics/
           if-no-files-found: warn
-      - name: Upload APK
+      - name: Upload clearly labeled test APK
         uses: actions/upload-artifact@v4
         with:
-          name: RTranslator-seamless-port-experimental-NOT-READY
-          path: app/build/outputs/apk/release/app-release.apk
-          if-no-files-found: error
+          name: Seamless-port-vocoder-test-NOT-A-TRANSLATOR
+          path: seamless/build/outputs/apk/release/seamless-release.apk
