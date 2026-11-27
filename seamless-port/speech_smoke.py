@@ -1,7 +1,8 @@
-"""Four real ONNX models driven by actual Mandarin speech and Java filterbanks.
+"""Four real ONNX models driven by Mandarin speech and Java filterbanks.
 
-Host-side integration smoke test mirrors the Android full-prefix policy. It is
-not an Android execution test or a semantic translation accuracy benchmark.
+Supports the validated full-prefix INT8 decoder and experimental incremental
+FP16 KV-cache decoder. Host smoke is not an Android speed or translation
+quality benchmark.
 """
 import argparse
 import json
@@ -19,95 +20,124 @@ def map_chars(tokens,meta):
     lengths=[0]*len(tokens)
     for i in range(2,len(tokens)):
         token=tokens[i]
-        if token in (meta["eos"],meta["pad"]):
-            break
+        if token in (meta["eos"],meta["pad"]):break
         ids,punc,space=table[token]
         n=len(ids)
         if token!=meta["unk"]:
-            if punc and i+1<len(tokens) and table[tokens[i+1]][2]:
-                n+=1
-            elif i>2 and table[tokens[i-1]][1] and space:
-                n-=1
+            if punc and i+1<len(tokens) and table[tokens[i+1]][2]:n+=1
+            elif i>2 and table[tokens[i-1]][1] and space:n-=1
         lengths[i-1]=n
         chars.extend(ids)
-    if sum(lengths)!=len(chars):
-        raise RuntimeError("character mapping alignment")
+    if sum(lengths)!=len(chars):raise RuntimeError("character mapping alignment")
     return np.array([chars],dtype=np.int64),np.array([lengths],dtype=np.int64)
+
+
+class IncrementalDecoder:
+    def __init__(self,session,meta,encoded):
+        self.session=session;self.meta=meta;self.encoded=encoded
+        self.caches=[np.empty((1,int(meta["heads"]),0,int(meta["head_dim"])),dtype=np.float32)
+                     for _ in meta["past_names"]]
+
+    def run(self,ids,position):
+        feeds={"tokens":np.asarray([ids],dtype=np.int64),
+               "encoded":self.encoded,
+               "position":np.asarray([position],dtype=np.int64)}
+        feeds.update({name:value for name,value in zip(self.meta["past_names"],self.caches)})
+        values=self.session.run(self.meta["output_names"],feeds)
+        logits,features,choose=values[:3]
+        self.caches=values[3:]
+        if not all(np.isfinite(x).all() for x in (logits,features,choose)):
+            raise RuntimeError("non-finite incremental decoder output")
+        token=int(logits[0,-1].argmax())
+        probability=float(np.min(choose[...,-1,-1]))
+        return token,probability,features
 
 
 def run(directory,fbank,out,update_frames=64):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
-    if len(features)<400:
-        raise ValueError("need >4 seconds of speech")
-    opts=ort.SessionOptions()
-    opts.intra_op_num_threads=4
-    opts.inter_op_num_threads=1
+    if len(features)<400:raise ValueError("need >4 seconds of speech")
+    opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
+    incremental_path=directory/"decoder.incremental.fp16.onnx"
+    incremental=incremental_path.is_file()
+    decoder_name=incremental_path.name if incremental else "decoder.int8.onnx"
+    decoder_meta=json.loads((directory/"decoder.incremental.meta.json").read_text()) if incremental else None
     start=time.monotonic()
     from decoder_session import configure_native
-    decoder_opts=ort.SessionOptions()
-    decoder_opts.intra_op_num_threads=4
-    decoder_opts.inter_op_num_threads=1
-    configure_native(decoder_opts)
+    decoder_opts=ort.SessionOptions();decoder_opts.intra_op_num_threads=4;decoder_opts.inter_op_num_threads=1
+    if not incremental:configure_native(decoder_opts)
     sessions=[]
     from quantize_int8 import rss_mib
-    for name in ("encoder.int8.onnx","decoder.int8.onnx","units.onnx","vocoder.onnx"):
+    specs=[("encoder.int8.onnx",opts),(decoder_name,decoder_opts),("units.onnx",opts),("vocoder.onnx",opts)]
+    for name,session_opts in specs:
         loaded=time.monotonic()
-        sessions.append(ort.InferenceSession(str(directory/name),decoder_opts if name=="decoder.int8.onnx" else opts,providers=["CPUExecutionProvider"]))
+        sessions.append(ort.InferenceSession(str(directory/name),session_opts,providers=["CPUExecutionProvider"]))
         print(json.dumps({"loaded":name,"seconds":time.monotonic()-loaded,"rss_mib":rss_mib()}),flush=True)
     enc,dec,unit,voc=sessions
     load_time=time.monotonic()-start
-    tokens=list(meta["prefix"])
-    duration_start=0
-    first_audio=None
-    waves=[]
-    times=[]
-    start=time.monotonic()
-
+    tokens=list(meta["prefix"]);duration_start=0;first_audio=None;waves=[];times=[]
     phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0}
-    decoder_calls=0
-    decoder_input_tokens=0
+    decoder_calls=0;decoder_input_tokens=0
+
     def predict(ids,encoded):
         nonlocal decoder_calls,decoder_input_tokens
         t0=time.monotonic()
         logits,feats,choose=dec.run(["logits","features","p_choose"],
-                {"tokens":np.array([ids],np.int64),"encoded":encoded})
+                {"tokens":np.asarray([ids],np.int64),"encoded":encoded})
         phase_totals["decoder_seconds"]+=time.monotonic()-t0
-        decoder_calls+=1
-        decoder_input_tokens+=len(ids)
+        decoder_calls+=1;decoder_input_tokens+=len(ids)
         if not all(np.isfinite(x).all() for x in (logits,feats,choose)):
             raise RuntimeError("non-finite decoder output")
         return int(logits[0,-1].argmax()),float(choose[...,-1,-1].min()),feats
 
+    def incremental_predict(state,ids,position):
+        nonlocal decoder_calls,decoder_input_tokens
+        t0=time.monotonic();result=state.run(ids,position)
+        phase_totals["decoder_seconds"]+=time.monotonic()-t0
+        decoder_calls+=1;decoder_input_tokens+=len(ids)
+        return result
+
     if update_frames<32 or update_frames>160 or update_frames%32:
         raise ValueError("update_frames must be a multiple of 32 between 32 and 160")
     end=len(features)&~1
-    # Transport frames remain 320 ms. Inference cadence can be coarser without
-    # dropping audio; each call still receives the complete accumulated prefix.
     for count in list(range(192,end,update_frames))+[end]:
-        t0=time.monotonic()
-        finished=count==end
+        t0=time.monotonic();finished=count==end
         phase_start=time.monotonic()
         encoded=enc.run(["encoded"],{"fbank":features[None,:count,:]})[0]
-        enc_elapsed=time.monotonic()-phase_start
-        phase_totals["encoder_seconds"]+=enc_elapsed
-        old=len(tokens)
-        decoder_before=phase_totals["decoder_seconds"]
+        enc_elapsed=time.monotonic()-phase_start;phase_totals["encoder_seconds"]+=enc_elapsed
+        old=len(tokens);decoder_before=phase_totals["decoder_seconds"]
         units_elapsed=vocoder_elapsed=0.0
-        for _ in range(50):
-            tok,p,_=predict(tokens,encoded)
-            if tok==meta["eos"] or (not finished and p<0.5):break
-            if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
-            tokens.append(tok)
+        state=None;feature_rows=None
+        if incremental:
+            state=IncrementalDecoder(dec,decoder_meta,encoded)
+            tok,p,initial_features=incremental_predict(state,tokens,0)
+            feature_rows=[row for row in initial_features[0]]
+            for _ in range(50):
+                if tok==meta["eos"] or (not finished and p<0.5):break
+                if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
+                tokens.append(tok)
+                tok,p,step_features=incremental_predict(state,[tokens[-1]],len(tokens)-1)
+                feature_rows.append(step_features[0][0])
+        else:
+            for _ in range(50):
+                tok,p,_=predict(tokens,encoded)
+                if tok==meta["eos"] or (not finished and p<0.5):break
+                if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
+                tokens.append(tok)
+
         if len(tokens)>3 and (len(tokens)>old or finished):
             ids=tokens+[meta["comma"]]
             chars,lengths=map_chars(ids,meta)
-            _,_,feats=predict(ids,encoded)
+            if incremental:
+                _,_,comma_features=incremental_predict(state,[meta["comma"]],len(tokens))
+                feats=np.asarray([feature_rows+[comma_features[0][0]]],dtype=np.float32)
+            else:
+                _,_,feats=predict(ids,encoded)
             phase_start=time.monotonic()
-            logits,durations=unit.run(["logits","durations"],{"features":feats,"chars":chars,"char_lens":lengths})
-            units_elapsed=time.monotonic()-phase_start
-            phase_totals["units_seconds"]+=units_elapsed
+            logits,durations=unit.run(["logits","durations"],
+                {"features":feats,"chars":chars,"char_lens":lengths})
+            units_elapsed=time.monotonic()-phase_start;phase_totals["units_seconds"]+=units_elapsed
             d=durations[0]
             if duration_start>len(d) or np.any(d<0):raise RuntimeError("invalid duration context")
             offset=int(d[:duration_start].sum())
@@ -118,27 +148,31 @@ def run(directory,fbank,out,update_frames=64):
                 if np.any(ids<0) or np.any(ids>=10000):raise RuntimeError("invalid acoustic unit")
                 phase_start=time.monotonic()
                 pcm=voc.run(["waveform"],{"units":ids[None,:].astype(np.int64)})[0].reshape(-1)
-                vocoder_elapsed=time.monotonic()-phase_start
-                phase_totals["vocoder_seconds"]+=vocoder_elapsed
+                vocoder_elapsed=time.monotonic()-phase_start;phase_totals["vocoder_seconds"]+=vocoder_elapsed
                 if not np.isfinite(pcm).all() or len(pcm)==0:raise RuntimeError("invalid waveform")
                 waves.append(pcm)
                 if first_audio is None:first_audio={"source_seconds":count/100,"before_eof":not finished,"wall_seconds":time.monotonic()-start}
                 duration_start=max(0,len(d)-1)
         step_decoder=phase_totals["decoder_seconds"]-decoder_before
         times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,
-                      "encoder_seconds":enc_elapsed,"decoder_seconds":step_decoder,
-                      "units_seconds":units_elapsed,"vocoder_seconds":vocoder_elapsed,
-                      "decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
-                      "tokens":len(tokens)-2,"rss_mib":rss_mib()})
+            "encoder_seconds":enc_elapsed,"decoder_seconds":step_decoder,
+            "units_seconds":units_elapsed,"vocoder_seconds":vocoder_elapsed,
+            "decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
+            "tokens":len(tokens)-2,"rss_mib":rss_mib()})
         print(times[-1],flush=True)
+        del state,feature_rows
+
     pcm=np.concatenate(waves) if waves else np.array([],np.float32)
     if len(pcm):
         with wave.open(str(out),"wb") as w:
             w.setnchannels(1);w.setsampwidth(2);w.setframerate(16000)
             w.writeframes((np.clip(pcm,-1,1)*32767).astype("<i2").tobytes())
     elapsed=time.monotonic()-start
-    success=bool(first_audio and first_audio["before_eof"] and len(pcm)>=8000 and np.sqrt(np.mean(pcm**2))>1e-5 and len(tokens)>4)
-    result={"result":"PASS" if success else "FAIL","scope":"host waveform smoke only, not translation quality or Android speed",
+    success=bool(first_audio and first_audio["before_eof"] and len(pcm)>=8000 and
+                 np.sqrt(np.mean(pcm**2))>1e-5 and len(tokens)>4)
+    result={"result":"PASS" if success else "FAIL",
+       "scope":"host waveform smoke only, not translation quality or Android speed",
+       "decoder_mode":"incremental-fp16-kv-cache" if incremental else "full-prefix-int8",
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,

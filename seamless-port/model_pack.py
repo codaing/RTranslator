@@ -15,7 +15,7 @@ NOTICE="""SeamlessStreaming model weights: Meta Platforms, Inc.
 Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.
 Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
 Source: https://github.com/facebookresearch/seamless_communication
-Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and native asymmetric grouped INT8 decoder feed-forward projections with floating-point inputs.
+Modifications: ONNX export; dynamic INT8 encoder; FP16 incremental KV-cache decoder; FP16 UnitY2 acoustic-unit decoder and vocoder.
 Noncommercial use only. Experimental conversion; no warranty.
 """
 
@@ -86,7 +86,11 @@ def merge(source,destination):
 
 def pack(source,output):
     required=set(NAMES.values())|{"tokenizer.json","MODEL-LICENSE.txt"}
-    files=sorted(p for p in source.iterdir() if p.is_file())
+    present_names={p.name for p in source.iterdir() if p.is_file()}
+    if "decoder.int8.onnx" not in present_names and "decoder.incremental.fp16.onnx" in present_names:
+        required.remove("decoder.int8.onnx")
+        required.add("decoder.incremental.fp16.onnx")
+    files=sorted(p for p in source.iterdir() if p.is_file() and p.name!="sha256.json")
     if not required.issubset({p.name for p in files}):
         raise ValueError("missing required model files")
     # This ZIP is generated only after the four-model smoke test succeeds.
