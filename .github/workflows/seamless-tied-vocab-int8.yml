@@ -1,0 +1,92 @@
+name: Full-vocabulary shared INT8 embedding and projection experiment
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-tied-vocab-int8.yml'
+      - 'seamless-port/quantize_tied_vocab.py'
+      - 'seamless-port/test_tied_vocab.py'
+      - 'seamless-port/compare_tied_vocab.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: tied-vocab-int8-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-and-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      BASELINE_RUN_ID: '46002703236'
+      UPDATE_FRAMES: '64'
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the previously validated four-model INT8 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-model-pack
+          path: base-artifact
+          run-id: ${{ env.BASELINE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Extract base package and free the outer artifact archive
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-incremental-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare Mandarin recording with Java filterbanks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python3 seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          sha256sum speech-input/mandarin.pcm speech-input/fbank.bin
+          lscpu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android-matching ONNX Runtime
+        run: python -m pip install 'numpy<2' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+      - name: Validate native tied INT8 projection and row-selective embedding
+        run: python -m unittest discover -s seamless-port -p test_tied_vocab.py
+      - name: Quantize the full vocabulary shared table
+        run: |
+          mkdir -p speech-reports
+          python -u seamless-port/quantize_tied_vocab.py models tied-models --group 64
+          cp tied-models/tied8-conversion.json speech-reports/
+      - name: Compare real speech on the same native runner
+        run: python -u seamless-port/compare_tied_vocab.py models tied-models speech-input/fbank.bin speech-reports
+      - name: Upload full-vocabulary experiment diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-tied8-report-${{ matrix.runner }}
+          path: speech-reports/
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload passing candidate for further testing only
+        if: success() && matrix.runner == 'ubuntu-24.04-arm'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-tied8-decoder-experimental
+          path: |
+            tied-models/decoder.incremental.fp16.onnx
+            tied-models/decoder.tied8.weights
+            tied-models/tied8*.json
+          compression-level: 0
+          retention-days: 3
