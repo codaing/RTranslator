@@ -11,6 +11,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: incremental-decoder-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   incremental:
     runs-on: ubuntu-22.04

@@ -10,6 +10,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: acoustic-fp16-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   precision:
     runs-on: ubuntu-22.04
