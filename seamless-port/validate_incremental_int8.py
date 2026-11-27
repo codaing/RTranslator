@@ -6,6 +6,7 @@ import numpy as np
 import onnx
 import onnxruntime as ort
 from weight_only_int8 import convert
+from fold_weights import prepare
 from decoder_session import configure_native
 
 
@@ -23,7 +24,14 @@ def main(directory):
     meta=json.loads((directory/"decoder.incremental.meta.json").read_text())
     baseline=json.loads((directory/"decoder.incremental.fp32.validated.json").read_text())
     if baseline.get("parity")!="PASS":raise RuntimeError("FP32 incremental parity gate missing")
-    graph=onnx.load(str(source),load_external_data=False)
+    prepared=prepare(source)
+    if prepared!=source:
+        original=onnx.load(str(source),load_external_data=False)
+        original_locations={e.value for t in original.graph.initializer for e in t.external_data if e.key=="location"}
+        del original
+        source.unlink(missing_ok=True)
+        for location in original_locations:(directory/location).unlink(missing_ok=True)
+    graph=onnx.load(str(prepared),load_external_data=False)
     initializers={t.name:t for t in graph.graph.initializer}
     selected=[];shape_counts={}
     for node in graph.graph.node:
@@ -33,9 +41,8 @@ def main(directory):
         shape=tuple(int(x) for x in weight.dims)
         shape_counts[str(shape)]=shape_counts.get(str(shape),0)+1
         # In this decoder the FFN inner/output matrices are the only non-square
-        # medium-width matrices. Attention projections are 1024x1024; vocab
-        # projection is much wider. Match by tensor shape because this export
-        # route does not preserve fairseq2 module path names on MatMul nodes.
+        # medium-width matrices. Attention projections are square; the vocab
+        # projection is much wider. Fold constant Transpose/Cast chains first.
         if len(shape)==2 and shape[0]!=shape[1] and min(shape)>=512 and max(shape)<=16384 and all(x%16==0 for x in shape):
             selected.append(node.name)
     if len(selected)!=48:
@@ -43,15 +50,12 @@ def main(directory):
     print(f"Selected {len(selected)} FFN matrices; shape counts={shape_counts}",flush=True)
     del graph
     start=time.monotonic()
-    convert(source,output,selected,group=16,native=True,asymmetric=True,bits=8)
+    convert(prepared,output,selected,group=16,native=True,asymmetric=True,bits=8)
     onnx.checker.check_model(str(output))
-    graph=onnx.load(str(source),load_external_data=False)
-    locations=set()
-    for t in graph.graph.initializer:
-        for e in t.external_data:
-            if e.key=="location":locations.add(e.value)
+    graph=onnx.load(str(prepared),load_external_data=False)
+    locations={e.value for t in graph.graph.initializer for e in t.external_data if e.key=="location"}
     del graph
-    source.unlink(missing_ok=True)
+    prepared.unlink(missing_ok=True)
     for location in locations:(directory/location).unlink(missing_ok=True)
     options=ort.SessionOptions();options.intra_op_num_threads=4;options.inter_op_num_threads=1
     configure_native(options)
