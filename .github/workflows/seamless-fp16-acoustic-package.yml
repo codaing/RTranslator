@@ -68,14 +68,13 @@ jobs:
           cp vocoder-artifact/vocoder.fp16.onnx.weights models/
           cp vocoder-artifact/vocoder.fp16.validated.json models/
           rm -rf vocoder-artifact
-          cat > models/MODEL-LICENSE.txt <<'EOF'
-SeamlessStreaming model weights: Meta Platforms, Inc.
-Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.
-Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
-Source: https://github.com/facebookresearch/seamless_communication
-Modifications: ONNX export; dynamic INT8 encoder; native asymmetric grouped INT8 decoder FFN projections; FP16 conversion of the UnitY2 acoustic-unit decoder and vocoder. FP16 acoustic components passed CPU ONNX Runtime parity tests. Experimental conversion; no warranty.
-Noncommercial use only.
-EOF
+          printf '%s\n' \
+            'SeamlessStreaming model weights: Meta Platforms, Inc.' \
+            'Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.' \
+            'Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/' \
+            'Source: https://github.com/facebookresearch/seamless_communication' \
+            'Modifications: ONNX export; dynamic INT8 encoder; native asymmetric grouped INT8 decoder FFN projections; FP16 conversion of the UnitY2 acoustic-unit decoder and vocoder. FP16 acoustic components passed CPU ONNX Runtime parity tests. Experimental conversion; no warranty.' \
+            'Noncommercial use only.' > models/MODEL-LICENSE.txt
           find models -maxdepth 1 -type f -printf '%f %s bytes\n' | sort
           df -h .
       - uses: actions/setup-java@v4
