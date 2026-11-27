@@ -46,6 +46,50 @@ def infer_types(model,base_dir):
     types={v.name:v for v in list(inferred.graph.input)+list(inferred.graph.value_info)+list(inferred.graph.output)}
     return work,types
 
+def explicit_transpose_type(graph,name,types,producers):
+    """Recover a transpose's exact rank, without guessing dimension sizes.
+
+    ONNX Transpose with an explicit perm has rank len(perm), independent
+    of upstream dynamic Reshape values. Trace only ops whose output dtype
+    is specified by their first input (or Cast's explicit target type).
+    """
+    g=graph
+    i=producers.get(name)
+    if i is None:return None
+    node=g.node[i]
+    if node.domain not in ("","ai.onnx") or node.op_type!="Transpose":return None
+    perm=next((list(a.ints) for a in node.attribute if a.name=="perm"),None)
+    if perm is None or sorted(perm)!=list(range(len(perm))):return None
+    initializers={t.name:t.data_type for t in g.initializer}
+    inputs={v.name:v.type.tensor_type.elem_type for v in g.input}
+    preserving={"Transpose","Reshape","MatMul","Gemm","Add","Sub","Mul","Div",
+                "Identity","Relu","Tanh","Sigmoid","Squeeze","Unsqueeze",
+                "Gather","Slice","Expand","Flatten","Concat","Neg","Pow",
+                "Sqrt","Erf","Clip","Softmax"}
+    def dtype(tensor,seen):
+        if tensor in seen:return 0
+        vi=types.get(tensor)
+        if vi is not None and vi.type.tensor_type.elem_type:
+            return vi.type.tensor_type.elem_type
+        if tensor in initializers:return initializers[tensor]
+        if tensor in inputs:return inputs[tensor]
+        j=producers.get(tensor)
+        if j is None:return 0
+        n=g.node[j]
+        if n.domain not in ("","ai.onnx"):return 0
+        if n.op_type=="Cast":
+            return next((a.i for a in n.attribute if a.name=="to"),0)
+        if n.op_type=="Constant":
+            return next((a.t.data_type for a in n.attribute if a.name=="value"
+                         and a.type==onnx.AttributeProto.TENSOR),0)
+        if n.op_type in preserving and n.input:
+            return dtype(n.input[0],seen|{tensor})
+        return 0
+    elem=dtype(name,set())
+    if not elem:return None
+    # Do not infer fixed dimensions from a sample or invent symbolic sizes.
+    return h.make_tensor_value_info(name,elem,[None]*len(perm))
+
 def partition(model,base_dir="."):
     g=model.graph
     initializers={x.name:x for x in g.initializer}
@@ -100,8 +144,17 @@ def partition(model,base_dir="."):
     def valid(v):
         return v is not None and v.type.tensor_type.elem_type and v.type.tensor_type.HasField("shape")
     missing=[name for name in boundary if not valid(types.get(name))]
+    recovered=[]
+    for name in missing:
+        vi=explicit_transpose_type(g,name,types,producers)
+        if vi is not None:
+            types[name]=vi
+            recovered.append(name)
+    if recovered:
+        print("recovered explicit transpose ranks",len(recovered),flush=True)
+    missing=[name for name in boundary if not valid(types.get(name))]
     if missing:
-        print("standard inference missing",missing,flush=True)
+        print("standard and transpose inference missing",missing,flush=True)
         # Isolate the source subgraph, with only the original encoded input.
         # Symbolic inference can attempt to evaluate floating-point weights
         # (e.g. an Add bias), even when only shapes are needed. Represent all
@@ -147,6 +200,7 @@ def partition(model,base_dir="."):
     if matmuls<1:raise ValueError("no source-only matrix multiplications hoisted")
     report={"source_nodes":len(source_nodes),"source_matmuls":matmuls,
             "main_nodes":len(main_nodes),"boundary":boundary,
+            "explicit_transpose_ranks":recovered,
             "main_inputs":[v.name for v in main_inputs]}
     return source,main,report
 

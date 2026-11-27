@@ -99,3 +99,64 @@ class SplitSourceTest(unittest.TestCase):
                 projected=src.run(None,{"encoded":e})[0]
                 actual=step.run(None,{"biased":projected,"target":t})[0]
                 np.testing.assert_array_equal(expected,actual)
+
+    def test_explicit_transpose_rank_without_symbolic_reshape(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from split_source_projections import infer_types
+        import onnxruntime as ort
+        def vi(n,shape):return h.make_tensor_value_info(n,T.FLOAT,shape)
+        # Dynamic Shape/Gather/Concat drives Reshape; the boundary transpose
+        # still has a schema-defined rank even if generic shape inference fails.
+        g=h.make_graph([
+            h.make_node("MatMul",["encoded","w"],["projected"]),
+            h.make_node("Shape",["projected"],["original_shape"]),
+            h.make_node("Gather",["original_shape","axis"],["length"],axis=0),
+            h.make_node("Concat",["one","length","two","two"],["new_shape"],axis=0),
+            h.make_node("Reshape",["projected","new_shape"],["reshaped"]),
+            h.make_node("Transpose",["reshaped"],["transposed"],perm=[0,2,1,3]),
+            h.make_node("Add",["transposed","target"],["y"])],
+            "dynamic_transpose",[vi("encoded",[1,"sequence",4]),
+                                 vi("target",[1,2,"sequence",2])],
+            [vi("y",[1,2,"sequence",2])],
+            [nh.from_array(np.eye(4,dtype=np.float32),name="w"),
+             nh.from_array(np.array([1],np.int64),name="axis"),
+             nh.from_array(np.array([1],np.int64),name="one"),
+             nh.from_array(np.array([2],np.int64),name="two")])
+        m=h.make_model(g,opset_imports=[h.make_opsetid("",17)],ir_version=9)
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/"original.onnx"
+            onnx.save_model(m,str(p),save_as_external_data=True,all_tensors_to_one_file=True,
+                location="weights.bin",size_threshold=0)
+            original=onnx.load(str(p),load_external_data=False)
+            def force_missing(model,base_dir):
+                work,types=infer_types(model,base_dir)
+                for name in ("transposed","reshaped","projected"):
+                    types.pop(name,None)
+                return work,types
+            with patch("split_source_projections.infer_types",side_effect=force_missing), \
+                 patch("onnxruntime.tools.symbolic_shape_infer.SymbolicShapeInference.infer_shapes",
+                       side_effect=AssertionError("symbolic fallback must not run")):
+                source,main,report=partition(original,tmp)
+            self.assertEqual(report["boundary"],["transposed"])
+            self.assertEqual(report["explicit_transpose_ranks"],["transposed"])
+            tensor=source.graph.output[0].type.tensor_type
+            self.assertEqual(tensor.elem_type,T.FLOAT)
+            self.assertEqual(len(tensor.shape.dim),4)
+            self.assertTrue(all(not d.HasField("dim_value") for d in tensor.shape.dim))
+            for name,model in (("source",source),("main",main)):
+                path=Path(tmp)/(name+".onnx")
+                onnx.save_model(model,str(path))
+                onnx.checker.check_model(str(path))
+            def session(name):
+                return ort.InferenceSession(str(Path(tmp)/(name+".onnx")),
+                    providers=["CPUExecutionProvider"])
+            baseline,src,step=map(session,("original","source","main"))
+            for n in (1,7,19):
+                e=np.arange(n*4,dtype=np.float32).reshape(1,n,4)
+                t=np.ones((1,2,n,2),dtype=np.float32)
+                expected=baseline.run(None,{"encoded":e,"target":t})[0]
+                projected=src.run(None,{"encoded":e})[0]
+                actual=step.run(None,{"transposed":projected,"target":t})[0]
+                np.testing.assert_array_equal(expected,actual)
