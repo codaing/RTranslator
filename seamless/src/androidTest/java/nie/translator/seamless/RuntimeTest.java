@@ -29,17 +29,25 @@ public class RuntimeTest {
         } finally { f.delete(); }
     }
     @Test public void fourModelStreamingChainProducesAudioBeforeEof() throws Exception {
+        chain("test-model-pack.zip",false);
+    }
+    @Test public void cachedDecoderProducesAudioBeforeEof() throws Exception {
+        chain("test-incremental-pack.zip",true);
+    }
+    private void chain(String pack,boolean cached)throws Exception{
         // Synthetic graphs validate application wiring, not translation quality.
         android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
         File parent=new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir(),"stream-test");
         ModelPack.clear(parent);assertTrue(parent.mkdir());
         File dir=new File(parent,"models");
         try {
-            try(InputStream in=context.getAssets().open("test-model-pack.zip")){ModelPack.importZip(in,dir);}
+            try(InputStream in=context.getAssets().open(pack)){ModelPack.importZip(in,dir);}
             assertTrue(ModelPack.present(dir));
+            assertEquals(cached,ModelPack.incremental(dir));
             assertTrue(new File(dir,"encoder.int8.onnx.weights").isFile());
             java.util.List<float[]> output=new java.util.ArrayList<>();
             try(StreamingEngine engine=new StreamingEngine(dir,false)){
+                assertEquals(cached?"incremental-fp16-kv-cache":"full-prefix-int8",engine.decoderMode());
                 short[] pcm=new short[5120];
                 for(int i=0;i<6;i++)engine.push(pcm,false,output::add);
                 assertTrue("must wait for minimum context",output.isEmpty());

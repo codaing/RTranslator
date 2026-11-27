@@ -1,0 +1,106 @@
+name: Package incremental FP16 decoder and run integrated speech test
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-incremental-package.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: incremental-package-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-and-smoke:
+    runs-on: ubuntu-22.04
+    env:
+      BASELINE_RUN_ID: '45994448932'
+      FP16_RUN_ID: '45993297345'
+      UPDATE_FRAMES: '64'
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the previously validated four-model INT8 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Seamless-INT8-FP16-acoustic-experimental-model-pack
+          path: base-artifact
+          run-id: ${{ env.BASELINE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Extract base package and free the outer artifact archive
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-int8-fp16-acoustic-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - name: Download validated incremental FP16 decoder
+        uses: actions/download-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-experimental
+          path: decoder-artifact
+          run-id: ${{ env.FP16_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Prepare Mandarin source and Java filterbanks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install 'numpy<2' 'torch==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          python seamless-port/check_fbank.py speech-input/mandarin.pcm speech-input/fbank.bin fbank-check.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android-matching ONNX Runtime
+        run: python -m pip install 'numpy<2' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+      - name: Verify base package and replace only the decoder
+        run: |
+          python -u seamless-port/install_incremental.py models decoder-artifact
+          rm -rf decoder-artifact
+          df -h .
+      - name: Run integrated Mandarin speech test with incremental FP16 decoder
+        id: smoke
+        run: |
+          set -o pipefail
+          mkdir -p speech-reports
+          python -u seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav --update-frames "$UPDATE_FRAMES" 2>&1 | tee speech-reports/smoke.log
+          cat models/speech-smoke.json
+      - name: Create smaller importable model ZIP
+        if: steps.smoke.outcome == 'success'
+        run: |
+          rm -f models/sha256.json
+          python seamless-port/model_pack.py pack models seamless-incremental-fp16-experimental.zip
+          ls -lh seamless-incremental-fp16-experimental.zip
+      - name: Upload smaller importable model package
+        if: steps.smoke.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-model-pack
+          path: seamless-incremental-fp16-experimental.zip
+          compression-level: 0
+          retention-days: 3
+      - name: Upload integrated speech diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-speech-report
+          path: |
+            models/speech-smoke.json
+            speech-reports/
+            fbank-check.json
+          if-no-files-found: warn
+          retention-days: 7

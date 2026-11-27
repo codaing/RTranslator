@@ -13,6 +13,8 @@ final class StreamingEngine implements AutoCloseable {
     private OrtSession encoder,decoder,units;
     private EnglishUnitVocoder vocoder;
     private final TokenMetadata tokens;
+    private DecoderCache.Layout cacheLayout;
+    String decoderMode(){return cacheLayout==null?"full-prefix-int8":"incremental-fp16-kv-cache";}
     private final StreamingFbank fbank=new StreamingFbank();
     private final List<float[]> frames=new ArrayList<>();
     private final List<Long> accepted=new ArrayList<>();
@@ -28,7 +30,11 @@ final class StreamingEngine implements AutoCloseable {
         for(long x:tokens.prefix)accepted.add(x);
         try{
             encoder=open(dir,"encoder.int8.onnx");
-            decoder=open(dir,"decoder.int8.onnx");
+            if(ModelPack.incremental(dir)){
+                cacheLayout=new DecoderCache.Layout(dir);
+                decoder=open(dir,DecoderCache.GRAPH);
+                cacheLayout.check(decoder);
+            }else decoder=open(dir,"decoder.int8.onnx");
             units=open(dir,"units.onnx");
             vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath());
         }catch(Exception|OutOfMemoryError e){try{close();}catch(Exception ignored){}throw e;}
@@ -61,7 +67,7 @@ final class StreamingEngine implements AutoCloseable {
     private static Object value(OrtSession.Result r,String name)throws OrtException{
         return r.get(name).orElseThrow(()->new IllegalStateException("missing output "+name)).getValue();
     }
-    private static final class Prediction {
+    static final class Prediction {
         final int token;final float p;final float[][][] features;
         Prediction(int t,float p,float[][][] f){token=t;this.p=p;features=f;}
     }
@@ -89,17 +95,22 @@ final class StreamingEngine implements AutoCloseable {
         }
         int oldSize=accepted.size();
         boolean eos=false;float eosProbability=0;
+        // Cache is valid only for this encoder output. Native result tensors
+        // are held until the next ORT call finishes, then closed.
+        try(DecoderCache cache=cacheLayout==null?null:new DecoderCache(env,decoder,cacheLayout,encoded)){
+        Prediction p=cache==null?null:cache.step(prefix(false));
         for(int i=0;i<50;i++){
-            Prediction p=predict(prefix(false),encoded);
+            if(cache==null)p=predict(prefix(false),encoded);
             if(p.token==tokens.eos){eos=true;eosProbability=p.p;break;}
             if(!StreamingPolicy.write(p.p,p.token,tokens.eos,finished))break;
             if(accepted.size()-tokens.prefix.length>=MAX_TOKENS)
                 throw new IllegalStateException("100-token experimental context limit reached");
             accepted.add((long)p.token);
+            if(cache!=null)p=cache.step(new long[]{p.token});
         }
         boolean rollover=!finished&&boundary.candidate(adaptive,count,targetTokens(),eos,eosProbability);
         if(targetTokens()<2||(!finished&&!rollover&&oldSize==accepted.size()))return;
-        boolean flushed=synthesize(encoded,finished||rollover,sink);
+        boolean flushed=synthesize(encoded,cache,finished||rollover,sink);
         // This is an experimental EOS + quiet boundary heuristic, not proof
         // of source coverage. Reset only after successful output handoff.
         if(rollover&&flushed){
@@ -107,14 +118,17 @@ final class StreamingEngine implements AutoCloseable {
             accepted.clear();for(long x:tokens.prefix)accepted.add(x);
             durationStart=0;lastFrameCount=0;boundary.reset();rollovers++;
         }
+        }
     }
-    private boolean synthesize(float[][][] encoded,boolean flush,Sink sink)throws Exception{
+    private boolean synthesize(float[][][] encoded,DecoderCache cache,boolean flush,Sink sink)throws Exception{
         long[] t=prefix(true);
         TokenMetadata.Mapping m=tokens.map(t);
         if(m.chars.length==0)return false;
-        Prediction p=predict(t,encoded);
-        if(p.features[0].length!=t.length)throw new IllegalStateException("decoder feature alignment");
-        try(OnnxTensor f=OnnxTensor.createTensor(env,p.features);OnnxTensor ch=longs(m.chars);
+        float[][][] features;
+        if(cache!=null){cache.step(new long[]{tokens.comma});features=cache.allFeatures();}
+        else features=predict(t,encoded).features;
+        if(features[0].length!=t.length)throw new IllegalStateException("decoder feature alignment");
+        try(OnnxTensor f=OnnxTensor.createTensor(env,features);OnnxTensor ch=longs(m.chars);
             OnnxTensor len=longs(m.lengths);OrtSession.Result r=units.run(Map.of("features",f,"chars",ch,"char_lens",len))){
             long[] d=((long[][])value(r,"durations"))[0];
             if(durationStart>d.length)throw new IllegalStateException("duration prefix shrank");

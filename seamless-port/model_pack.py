@@ -66,12 +66,15 @@ def stage(component,source,destination):
     if component=="decoder" and not any(n.op_type=="MatMulNBits" and n.domain=="com.microsoft" for n in graph.graph.node):
         raise ValueError("decoder is missing native packed matrix multiplication")
     copy_unique(source/name,destination/name)
+    locations=set()
     for t in tensors(graph.graph):
         if uses_external_data(t):
             location=dict((e.key,e.value) for e in t.external_data)["location"]
             if not re.fullmatch(r"[A-Za-z0-9_.:-]{1,240}",location) or location in (".",".."):
                 raise ValueError(f"unsafe or nested external file: {location}")
-            copy_unique(source/location,destination/location)
+            locations.add(location)
+    for location in sorted(locations):
+        copy_unique(source/location,destination/location)
     copy_unique(marker,destination/marker.name)
     if component=="units":
         copy_unique(source/"tokenizer.json",destination/"tokenizer.json")
@@ -89,12 +92,17 @@ def pack(source,output):
     present_names={p.name for p in source.iterdir() if p.is_file()}
     if "decoder.int8.onnx" not in present_names and "decoder.incremental.fp16.onnx" in present_names:
         required.remove("decoder.int8.onnx")
-        required.add("decoder.incremental.fp16.onnx")
+        required.update({"decoder.incremental.fp16.onnx","decoder.incremental.meta.json","decoder.incremental.fp16.validated.json"})
+        report=json.loads((source/"decoder.incremental.fp16.validated.json").read_text())
+        if report.get("parity")!="PASS" or report.get("precision")!="fp16-incremental-experimental":
+            raise ValueError("incremental decoder parity gate missing")
     files=sorted(p for p in source.iterdir() if p.is_file() and p.name!="sha256.json")
     if not required.issubset({p.name for p in files}):
         raise ValueError("missing required model files")
     # This ZIP is generated only after the four-model smoke test succeeds.
     check=json.loads((source/"speech-smoke.json").read_text())
+    if "decoder.incremental.fp16.onnx" in present_names and check.get("decoder_mode")!="incremental-fp16-kv-cache":
+        raise ValueError("incremental decoder did not run in speech test")
     if check.get("result")!="PASS":
         raise ValueError("speech smoke gate not passed")
     (source/"sha256.json").write_text(json.dumps({p.name:digest(p) for p in files},indent=2)+"\n")

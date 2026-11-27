@@ -20,7 +20,7 @@ final class OfflineBenchmark {
         final boolean[] eof={false},beforeEof={false};
         final double[] energy={0};
         long computeStart;
-        int tokens;
+        int tokens;String decoderMode;
         try(StreamingEngine engine=new StreamingEngine(dir,false)){
             load=SystemClock.elapsedRealtime()-start;
             peak[0]=Math.max(peak[0],Debug.getPss());
@@ -45,12 +45,12 @@ final class OfflineBenchmark {
             eof[0]=true;
             engine.push(new short[0],true,sink);
             peak[0]=Math.max(peak[0],Debug.getPss());
-            tokens=engine.targetTokens();
+            tokens=engine.targetTokens();decoderMode=engine.decoderMode();
         }
         long elapsed=SystemClock.elapsedRealtime()-computeStart;
         double duration=samples.length/16000.0,rtf=elapsed/1000.0/duration;
-        return String.format(Locale.US,"Offline WAV benchmark (experimental)\nDevice %s / Android %s\nInput %.2f s | generated %.2f s\nModel load %.2f s | processing %.2f s (includes final flush and session close)\nRTF %.3f (below 1 is faster than audio duration)\nFirst generated audio %s | source consumed %s | before flush %s\nSampled peak PSS %.0f MiB | tokens %d\nWaveform RMS %.6f\nNo microphone, playback, network or TTS used. This is not a translation accuracy or live headphone latency test.",
-            android.os.Build.MODEL,android.os.Build.VERSION.RELEASE,duration,generated[0]/16000.0,load/1000.0,elapsed/1000.0,rtf,
+        return String.format(Locale.US,"Offline WAV benchmark (experimental)\nDevice %s / Android %s\nDecoder %s\nInput %.2f s | generated %.2f s\nModel load %.2f s | processing %.2f s (includes final flush and session close)\nRTF %.3f (below 1 is faster than audio duration)\nFirst generated audio %s | source consumed %s | before flush %s\nSampled peak PSS %.0f MiB | tokens %d\nWaveform RMS %.6f\nNo microphone, playback, network or TTS used. This is not a translation accuracy or live headphone latency test.",
+            android.os.Build.MODEL,android.os.Build.VERSION.RELEASE,decoderMode,duration,generated[0]/16000.0,load/1000.0,elapsed/1000.0,rtf,
             first[0]<0?"none":String.format(Locale.US,"%.2f s",first[0]/1000.0),firstSource[0]<0?"none":String.format(Locale.US,"%.2f s",firstSource[0]/16000.0),beforeEof[0]?"yes":"no",
             peak[0]/1024.0,tokens,generated[0]>0?Math.sqrt(energy[0]/generated[0]):0);
     }

@@ -7,11 +7,15 @@ import org.json.JSONObject;
 
 /** Flat ZIP only, external ONNX data must sit beside the graph. */
 final class ModelPack {
-    static final String[] REQUIRED={"encoder.int8.onnx","decoder.int8.onnx","units.onnx","vocoder.onnx","tokenizer.json"};
+    static final String[] REQUIRED={"encoder.int8.onnx","units.onnx","vocoder.onnx","tokenizer.json"};
+    private static boolean nonempty(File dir,String name){File f=new File(dir,name);return f.isFile()&&f.length()>0;}
+    static boolean incremental(File dir){return nonempty(dir,DecoderCache.GRAPH);}
     static boolean present(File dir){
         if(!new File(dir,"sha256.json").isFile())return false;
         for(String f:REQUIRED)if(!new File(dir,f).isFile()||new File(dir,f).length()==0)return false;
-        return true;
+        boolean legacy=nonempty(dir,"decoder.int8.onnx"),kv=incremental(dir);
+        if(legacy==kv)return false; // reject ambiguous packages
+        return legacy||nonempty(dir,DecoderCache.META);
     }
     static void clear(File dir)throws IOException{
         if(!dir.exists())return;

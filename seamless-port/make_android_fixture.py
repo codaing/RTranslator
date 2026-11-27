@@ -96,6 +96,33 @@ with tempfile.TemporaryDirectory() as temp:
                     z.writestr(p.name,p.read_bytes()+b" ")
                 else:z.write(p,p.name)
 
+    (d/"decoder.int8.onnx").unlink()
+    (d/"sha256.json").unlink()
+    graph="decoder.incremental.fp16.onnx"
+    save(d,graph,[
+        h.make_node("Cast",["tokens"],["float_tokens"],to=T.FLOAT),
+        h.make_node("Unsqueeze",["float_tokens","axis"],["features"]),
+        h.make_node("Unsqueeze",["features","head_axis"],["current"]),
+        h.make_node("Concat",["past_k_00","current"],["present_k_00"],axis=2),
+        h.make_node("Concat",["past_v_00","current"],["present_v_00"],axis=2),
+        h.make_node("Shape",["present_k_00"],["shape"]),
+        h.make_node("Gather",["shape","two"],["length"],axis=0),
+        h.make_node("Min",["length","four"],["row"]),
+        h.make_node("Gather",["logit_table","row"],["logits"],axis=0),
+        h.make_node("Identity",["decision"],["p_choose"])],
+        [vi("tokens",T.INT64,[1,"current_tokens"]),vi("encoded",T.FLOAT,[1,"frames",80]),
+         vi("position",T.INT64,[1]),vi("past_k_00",T.FLOAT,[1,1,"past",1]),vi("past_v_00",T.FLOAT,[1,1,"past",1])],
+        [vi("logits",T.FLOAT,[1,1,8]),vi("features",T.FLOAT,[1,"current_tokens",1]),
+         vi("p_choose",T.FLOAT,[1,1,1]),vi("present_k_00",T.FLOAT,[1,1,"total",1]),vi("present_v_00",T.FLOAT,[1,1,"total",1])],
+        [init("two",2,np.int64),init("four",4,np.int64),init("axis",[2],np.int64),
+         init("head_axis",[1],np.int64),init("logit_table",logits,np.float32),
+         init("decision",[[[0.9]]],np.float32)])
+    (d/"decoder.incremental.meta.json").write_text(json.dumps({"layers":1,"heads":1,"head_dim":1,
+        "past_names":["past_k_00","past_v_00"],"present_names":["present_k_00","present_v_00"]}))
+    (d/"sha256.json").write_text(json.dumps({p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in d.iterdir()}))
+    with zipfile.ZipFile(out/"test-incremental-pack.zip","w") as z:
+        for p in sorted(d.iterdir()):z.write(p,p.name)
+
 # Probe the actual Android ORT contrib operator with known packed weights.
 # Input K=32, N=2, block=16. Unsigned symmetric midpoint is 8 or 128.
 # Output columns have weights +0.25 and -0.5. No explicit zero points.
