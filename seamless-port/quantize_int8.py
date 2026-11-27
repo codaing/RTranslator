@@ -140,9 +140,8 @@ def quantize(component, directory, native=False, asymmetric=False, subset="all")
     if native:
         # Keep native operator available, avoid a second retained packed copy
         # where possible, and measure rather than assume memory improvement.
-        options.enable_cpu_mem_arena=False
-        options.enable_mem_pattern=False
-        options.add_session_config_entry("session.disable_prepacking","1")
+        from decoder_session import configure_native
+        configure_native(options)
     elif component=="decoder":
         from decoder_session import configure
         configure(options)

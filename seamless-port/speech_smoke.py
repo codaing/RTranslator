@@ -45,13 +45,18 @@ def run(directory,fbank,out):
     opts.intra_op_num_threads=4
     opts.inter_op_num_threads=1
     start=time.monotonic()
-    from decoder_session import configure
+    from decoder_session import configure_native
     decoder_opts=ort.SessionOptions()
     decoder_opts.intra_op_num_threads=4
     decoder_opts.inter_op_num_threads=1
-    configure(decoder_opts)
-    enc,dec,unit,voc=[ort.InferenceSession(str(directory/n),decoder_opts if n=="decoder.int8.onnx" else opts,providers=["CPUExecutionProvider"])
-        for n in ("encoder.int8.onnx","decoder.int8.onnx","units.onnx","vocoder.onnx")]
+    configure_native(decoder_opts)
+    sessions=[]
+    from quantize_int8 import rss_mib
+    for name in ("encoder.int8.onnx","decoder.int8.onnx","units.onnx","vocoder.onnx"):
+        loaded=time.monotonic()
+        sessions.append(ort.InferenceSession(str(directory/name),decoder_opts if name=="decoder.int8.onnx" else opts,providers=["CPUExecutionProvider"]))
+        print(json.dumps({"loaded":name,"seconds":time.monotonic()-loaded,"rss_mib":rss_mib()}),flush=True)
+    enc,dec,unit,voc=sessions
     load_time=time.monotonic()-start
     tokens=list(meta["prefix"])
     duration_start=0
@@ -97,7 +102,7 @@ def run(directory,fbank,out):
                 waves.append(pcm)
                 if first_audio is None:first_audio={"source_seconds":count/100,"before_eof":not finished,"wall_seconds":time.monotonic()-start}
                 duration_start=max(0,len(d)-1)
-        times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,"tokens":len(tokens)-2})
+        times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,"tokens":len(tokens)-2,"rss_mib":rss_mib()})
         print(times[-1],flush=True)
     pcm=np.concatenate(waves) if waves else np.array([],np.float32)
     if len(pcm):

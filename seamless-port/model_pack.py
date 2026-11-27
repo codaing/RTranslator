@@ -15,7 +15,7 @@ NOTICE="""SeamlessStreaming model weights: Meta Platforms, Inc.
 Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.
 Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
 Source: https://github.com/facebookresearch/seamless_communication
-Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and grouped weight-only INT8 decoder feed-forward projections with floating-point activations.
+Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and native asymmetric grouped INT8 decoder feed-forward projections with floating-point inputs.
 Noncommercial use only. Experimental conversion; no warranty.
 """
 
@@ -57,10 +57,14 @@ def stage(component,source,destination):
     name=NAMES[component]
     marker=source/(name.removesuffix(".onnx")+".validated.json")
     report=json.loads(marker.read_text())
-    expected={"encoder":"int8-dynamic","decoder":"int8-weight-only"}.get(component,"fp32")
+    expected={"encoder":"int8-dynamic","decoder":"int8-native-experimental"}.get(component,"fp32")
     if report.get("component")!=component or report.get("parity")!="PASS" or report.get("precision")!=expected:
         raise ValueError(f"missing validated {component} {expected}")
+    if component=="decoder" and report.get("policy")!="native8-group16-asymmetric-all":
+        raise ValueError("decoder must use the validated asymmetric native policy")
     graph=onnx.load(str(source/name),load_external_data=False)
+    if component=="decoder" and not any(n.op_type=="MatMulNBits" and n.domain=="com.microsoft" for n in graph.graph.node):
+        raise ValueError("decoder is missing native packed matrix multiplication")
     copy_unique(source/name,destination/name)
     for t in tensors(graph.graph):
         if uses_external_data(t):

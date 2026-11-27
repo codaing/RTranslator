@@ -11,6 +11,8 @@ on:
       - 'seamless-port/test_repair_encoder_graph.py'
       - 'seamless-port/shaw_regression.py'
       - 'seamless-port/quantize_int8.py'
+      - 'seamless-port/promote_native_decoder.py'
+      - 'seamless-port/decoder_session.py'
       - 'seamless-port/weight_only_int8.py'
       - 'seamless-port/test_weight_only_int8.py'
       - 'seamless-port/fold_weights.py'
@@ -71,12 +73,26 @@ jobs:
             python seamless-port/export_components.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/export.log
           fi
           test -s "model-check/${{ matrix.component }}.validated.json"
-      - name: Quantize and compare INT8 (decoder weight-only)
+      - name: Quantize and compare encoder INT8
         timeout-minutes: 100
-        if: matrix.component == 'encoder' || matrix.component == 'decoder'
+        if: matrix.component == 'encoder'
         run: |
-          python -u seamless-port/quantize_int8.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/int8.log
-          test -s "model-check/${{ matrix.component }}.int8.validated.json"
+          python -u seamless-port/quantize_int8.py encoder model-check 2>&1 | tee model-check/int8.log
+          test -s model-check/encoder.int8.validated.json
+      - uses: actions/setup-python@v5
+        if: matrix.component == 'decoder'
+        with:
+          python-version: '3.12'
+      - name: Install matching native decoder runtime
+        if: matrix.component == 'decoder'
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
+      - name: Quantize and compare validated native asymmetric INT8 policy
+        if: matrix.component == 'decoder'
+        timeout-minutes: 100
+        run: |
+          python -u seamless-port/native8_probe.py
+          python -u seamless-port/quantize_int8.py decoder model-check --native --asymmetric 2>&1 | tee model-check/int8.log
+          python -u seamless-port/promote_native_decoder.py model-check
       - name: Upload model validation reports (not weights)
         if: always()
         uses: actions/upload-artifact@v4
@@ -130,11 +146,16 @@ jobs:
           javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
           java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
           python seamless-port/check_fbank.py speech-input/mandarin.pcm speech-input/fbank.bin speech-reports/fbank.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install runtime matching the Android build
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
       - name: Assemble and run four-model speech smoke test
         run: |
           python seamless-port/model_pack.py merge components models
           rm -rf components
-          python seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav
+          python -u seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav 2>&1 | tee speech-reports/smoke.log
       - name: Collect speech report
         if: always()
         run: |
