@@ -5,6 +5,8 @@ FP16 KV-cache decoder. Host smoke is not an Android speed or translation
 quality benchmark.
 """
 import argparse
+import hashlib
+import platform
 import json
 from pathlib import Path
 import resource
@@ -33,8 +35,10 @@ def map_chars(tokens,meta):
 
 
 class IncrementalDecoder:
-    def __init__(self,session,meta,encoded):
+    def __init__(self,session,meta,encoded,projected=None):
         self.session=session;self.meta=meta;self.encoded=encoded
+        self.projected=projected or {}
+        self.input_names={x.name for x in session.get_inputs()}
         self.caches=[np.empty((1,int(meta["heads"]),0,int(meta["head_dim"])),dtype=np.float32)
                      for _ in meta["past_names"]]
 
@@ -43,6 +47,8 @@ class IncrementalDecoder:
                "encoded":self.encoded,
                "position":np.asarray([position],dtype=np.int64)}
         feeds.update({name:value for name,value in zip(self.meta["past_names"],self.caches)})
+        feeds.update(self.projected)
+        feeds={k:v for k,v in feeds.items() if k in self.input_names}
         values=self.session.run(self.meta["output_names"],feeds)
         logits,features,choose=values[:3]
         self.caches=values[3:]
@@ -53,7 +59,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default'):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -61,7 +67,8 @@ def run(directory,fbank,out,update_frames=64,session_profile='default'):
     opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
     incremental_path=directory/"decoder.incremental.fp16.onnx"
     incremental=incremental_path.is_file()
-    decoder_name=incremental_path.name if incremental else "decoder.int8.onnx"
+    if source_projections and not incremental:raise ValueError("projection cache requires incremental decoder")
+    decoder_name=("decoder.cached-step.onnx" if source_projections else incremental_path.name) if incremental else "decoder.int8.onnx"
     decoder_meta=json.loads((directory/"decoder.incremental.meta.json").read_text()) if incremental else None
     start=time.monotonic()
     from decoder_session import configure_native,configure_fp16
@@ -80,9 +87,14 @@ def run(directory,fbank,out,update_frames=64,session_profile='default'):
         sessions.append(ort.InferenceSession(str(directory/name),session_opts,providers=["CPUExecutionProvider"]))
         print(json.dumps({"loaded":name,"seconds":time.monotonic()-loaded,"rss_mib":rss_mib()}),flush=True)
     enc,dec,unit,voc=sessions
+    projection=None
+    if source_projections:
+        projection=ort.InferenceSession(str(directory/"decoder.source-projections.onnx"),decoder_opts,providers=["CPUExecutionProvider"])
+        print(json.dumps({"loaded":"decoder.source-projections.onnx","rss_mib":rss_mib()}),flush=True)
     load_time=time.monotonic()-start
     tokens=list(meta["prefix"]);duration_start=0;first_audio=None;waves=[];times=[]
-    phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0}
+    phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0,"source_projection_seconds":0.0}
+    decisions=[]
     decoder_calls=0;decoder_input_tokens=0
 
     def predict(ids,encoded):
@@ -115,8 +127,16 @@ def run(directory,fbank,out,update_frames=64,session_profile='default'):
         units_elapsed=vocoder_elapsed=0.0
         state=None;feature_rows=None
         if incremental:
-            state=IncrementalDecoder(dec,decoder_meta,encoded)
+            projected=None
+            if projection is not None:
+                t_proj=time.monotonic()
+                names=[o.name for o in projection.get_outputs()]
+                projected=dict(zip(names,projection.run(names,{"encoded":encoded})))
+                phase_totals["source_projection_seconds"]+=time.monotonic()-t_proj
+            state=IncrementalDecoder(dec,decoder_meta,encoded,projected)
             tok,p,initial_features=incremental_predict(state,tokens,0)
+            decisions.append({"source_frames":count,"prefix_tokens":len(tokens),"token":tok,"p_choose":p,
+                "encoded_sha256":hashlib.sha256(encoded.tobytes()).hexdigest(),"encoded_rms":float(np.sqrt(np.mean(encoded**2)))})
             feature_rows=[row for row in initial_features[0]]
             for _ in range(50):
                 if tok==meta["eos"] or (not finished and p<0.5):break
@@ -178,7 +198,9 @@ def run(directory,fbank,out,update_frames=64,session_profile='default'):
     result={"result":"PASS" if success else "FAIL",
        "scope":"host waveform smoke only, not translation quality or Android speed",
        "decoder_mode":"incremental-fp16-kv-cache" if incremental else "full-prefix-int8",
-       "session_profile":session_profile,
+       "session_profile":session_profile,"source_projections":source_projections,
+       "architecture":platform.machine(),"ort_version":ort.__version__,"numpy_version":np.__version__,
+       "fbank_sha256":hashlib.sha256(Path(fbank).read_bytes()).hexdigest(),"prefill_decisions":decisions,
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
@@ -192,4 +214,5 @@ if __name__=="__main__":
     p=argparse.ArgumentParser();p.add_argument("directory");p.add_argument("features");p.add_argument("output")
     p.add_argument("--update-frames",type=int,default=64)
     p.add_argument("--session-profile",choices=("default","no-retention","basic-no-retention"),default="default")
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile)
+    p.add_argument("--source-projections",action="store_true")
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections)

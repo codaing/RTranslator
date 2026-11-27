@@ -3,8 +3,6 @@ on:
   push:
     branches: [seamless-streaming]
     paths:
-      - 'seamless-port/speech_smoke.py'
-      - 'seamless/src/main/java/nie/translator/seamless/StreamingEngine.java'
       - '.github/workflows/seamless-mobile-optimization.yml'
   workflow_dispatch:
     inputs:

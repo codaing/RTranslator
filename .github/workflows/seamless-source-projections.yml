@@ -1,0 +1,83 @@
+name: Native ARM64 and x64 source-projection cache comparison
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-source-projections.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: source-projections-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  package-and-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    env:
+      BASELINE_RUN_ID: '46002703236'
+      UPDATE_FRAMES: '64'
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download the previously validated four-model INT8 package
+        uses: actions/download-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-model-pack
+          path: base-artifact
+          run-id: ${{ env.BASELINE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Extract base package and free the outer artifact archive
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-incremental-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Prepare fixed Mandarin input with Java filterbanks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python3 seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          sha256sum speech-input/mandarin.pcm speech-input/fbank.bin
+          uname -m
+          lscpu
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned native CPU ONNX Runtime
+        run: python -m pip install 'numpy==1.26.4' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+      - name: Run source projection partition unit tests
+        run: python -m unittest discover -s seamless-port -p test_split_source_projections.py
+      - name: Split source-only projections without copying weights
+        run: |
+          mkdir -p speech-reports
+          python -u seamless-port/split_source_projections.py models
+          cp models/decoder.source-projections.json speech-reports/
+      - name: Compare same input and model on one runner
+        run: |
+          set -euo pipefail
+          mkdir -p speech-reports
+          cp models/speech-smoke.json speech-reports/original.json
+          python -u seamless-port/compare_source_projections.py models speech-input/fbank.bin speech-reports
+      - name: Upload memory and speed diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-source-projections-${{ matrix.runner }}
+          path: speech-reports/
+          if-no-files-found: warn
+          retention-days: 7

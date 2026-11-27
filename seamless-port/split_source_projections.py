@@ -1,0 +1,120 @@
+"""Hoist encoder-only decoder computations into a per-source-update graph.
+
+Both graphs reference the same original external weights, without loading them
+into Python or rewriting precision. No target-conditioned node can move.
+Experimental: strict graph/type checks and real speech comparison required.
+"""
+import copy
+import json
+from pathlib import Path
+import onnx
+from onnx import helper as h
+
+def free_inputs(graph):
+    defined={x.name for x in graph.input}|{x.name for x in graph.initializer}
+    defined.update(o for n in graph.node for o in n.output if o)
+    used=set()
+    for n in graph.node:used.update(deps(n))
+    used.update(o.name for o in graph.output)
+    return used-defined
+
+def deps(node):
+    names={x for x in node.input if x}
+    for a in node.attribute:
+        if a.type==onnx.AttributeProto.GRAPH:names.update(free_inputs(a.g))
+        elif a.type==onnx.AttributeProto.GRAPHS:
+            for g in a.graphs:names.update(free_inputs(g))
+    return names
+
+def partition(model):
+    g=model.graph
+    initializers={x.name:x for x in g.initializer}
+    inputs={x.name:x for x in g.input}
+    if "encoded" not in inputs:raise ValueError("encoded input missing")
+    # Taint tracking: constant=0, source=1, target=2, mixed=3.
+    taint={name:0 for name in initializers}
+    taint.update({name:1 if name=="encoded" else 2 for name in inputs})
+    source_nodes=set()
+    for i,n in enumerate(g.node):
+        names=deps(n)
+        if not names.issubset(taint):
+            raise ValueError(f"unresolved inputs for {n.name}: {names-set(taint)}")
+        mask=0
+        for name in names:mask|=taint[name]
+        # Do not hoist nodes with control-flow graphs or nondeterministic ops.
+        if any(a.type in (onnx.AttributeProto.GRAPH,onnx.AttributeProto.GRAPHS) for a in n.attribute) or n.op_type.startswith("Random") or n.op_type in ("Dropout","Multinomial"):
+            mask|=2
+        if mask==1:source_nodes.add(i)
+        for name in n.output:
+            if name:taint[name]=mask
+    if not source_nodes:raise ValueError("no source-only computations")
+    # Pull constant-only producers into the source graph when needed, but keep
+    # any shared producer in the main graph as well.
+    producers={o:i for i,n in enumerate(g.node) for o in n.output if o}
+    main_nodes=set(range(len(g.node)))-source_nodes
+    source_needed=set(source_nodes)
+    pending=list(source_nodes)
+    while pending:
+        i=pending.pop()
+        for x in deps(g.node[i]):
+            j=producers.get(x)
+            if j is not None and j not in source_needed:
+                if taint[x]!=0:raise ValueError("nonconstant dependency in hoisted graph")
+                source_needed.add(j);pending.append(j)
+    main_used=set().union(*(deps(g.node[i]) for i in main_nodes)) if main_nodes else set()
+    main_used.update(x.name for x in g.output)
+    source_outputs={o for i in source_nodes for o in g.node[i].output if o}
+    boundary=sorted(source_outputs&main_used)
+    if not boundary:raise ValueError("no source projection boundary")
+    # Remove constant-only dead branches from main, but preserve shared ones.
+    required=set()
+    pending=list(main_used & {x.name for x in g.output})
+    while pending:
+        x=pending.pop();i=producers.get(x)
+        if i is None or i in source_nodes or i in required:continue
+        required.add(i);pending.extend(deps(g.node[i]))
+    main_nodes=required
+    boundary=sorted(source_outputs & (set().union(*(deps(g.node[i]) for i in main_nodes))|{x.name for x in g.output}))
+    if not boundary:raise ValueError("no live source projection boundary")
+    # Shape inference reads graph metadata only, never materializes weights.
+    inferred=onnx.shape_inference.infer_shapes(model,strict_mode=False,data_prop=False)
+    types={v.name:v for v in list(inferred.graph.input)+list(inferred.graph.value_info)+list(inferred.graph.output)}
+    for name in boundary:
+        vi=types.get(name)
+        if vi is None or not vi.type.tensor_type.elem_type or not vi.type.tensor_type.HasField("shape"):
+            raise ValueError("missing inferred boundary type: "+name)
+    def build(indices,graph_inputs,graph_outputs,name):
+        nodes=[g.node[i] for i in sorted(indices)]
+        used=set().union(*(deps(n) for n in nodes))
+        used.update(v.name for v in graph_outputs)
+        weights=[v for v in g.initializer if v.name in used]
+        new=copy.deepcopy(model)
+        new.graph.CopyFrom(h.make_graph(nodes,name,graph_inputs,graph_outputs,weights))
+        return new
+    source=build(source_needed,[inputs["encoded"]],[types[n] for n in boundary],"source_projections")
+    main_deps=set().union(*(deps(g.node[i]) for i in main_nodes))|{x.name for x in g.output}
+    main_inputs=[v for v in g.input if v.name in main_deps]+[types[n] for n in boundary]
+    main=build(main_nodes,main_inputs,list(g.output),"cached_decoder")
+    # Require actual expensive projections, not just scalar/shape operations.
+    matmuls=sum(g.node[i].op_type in ("MatMul","Gemm") for i in source_nodes)
+    if matmuls<1:raise ValueError("no source-only matrix multiplications hoisted")
+    report={"source_nodes":len(source_nodes),"source_matmuls":matmuls,
+            "main_nodes":len(main_nodes),"boundary":boundary,
+            "main_inputs":[v.name for v in main_inputs]}
+    return source,main,report
+
+def main(directory):
+    directory=Path(directory)
+    graph=directory/"decoder.incremental.fp16.onnx"
+    model=onnx.load(str(graph),load_external_data=False)
+    source,decoder,report=partition(model)
+    for name,m in (("decoder.source-projections.onnx",source),("decoder.cached-step.onnx",decoder)):
+        path=directory/name
+        onnx.save_model(m,str(path))
+        onnx.checker.check_model(str(path))
+    (directory/"decoder.source-projections.json").write_text(json.dumps(report,indent=2)+"\n")
+    print(json.dumps(report,indent=2),flush=True)
+
+if __name__=="__main__":
+    import sys
+    main(sys.argv[1])
