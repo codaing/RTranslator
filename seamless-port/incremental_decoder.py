@@ -67,7 +67,7 @@ def main(directory):
     target=directory/"decoder.incremental.fp32.onnx"
     marker=directory/"decoder.incremental.fp32.validated.json"
     marker.unlink(missing_ok=True)
-    torch.set_num_threads(4);torch.manual_seed(20261127)
+    torch.set_num_threads(4);torch.manual_seed(0)
     model=load_monotonic_decoder_model("seamless_streaming_monotonic_decoder",
         device=torch.device("cpu"),dtype=torch.float32).eval()
     tokenizer=load_unity_text_tokenizer("seamless_streaming_unity")
@@ -83,7 +83,7 @@ def main(directory):
     output_names=["logits","features","p_choose"]+present_names
     wrapper=IncrementalDecoder(model).eval()
     sample_tokens=torch.cat((prefix,torch.tensor([[101]],dtype=torch.long)),dim=1)
-    sample_encoded=torch.randn(1,64,model.text_decoder.model_dim)
+    sample_encoded=torch.zeros(1,64,model.text_decoder.model_dim)
     empty=[torch.empty((1,heads,0,dim),dtype=torch.float32) for _ in past_names]
     dynamic={"tokens":{1:"current_tokens"},"encoded":{1:"source_frames"},
              "features":{1:"current_tokens"},"p_choose":{1:"current_tokens",2:"source_frames"}}
@@ -97,10 +97,12 @@ def main(directory):
     print(f"Exported incremental graph in {time.monotonic()-start:.1f}s ({target.stat().st_size:,} graph bytes)",flush=True)
     opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
     session=ort.InferenceSession(str(target),sess_options=opts,providers=["CPUExecutionProvider"])
-    vocab=model.final_proj.weight.shape[0]
     all_metrics=[]
-    for case,frames in enumerate((48,64,96)):
-        tail=torch.randint(100,vocab-100,(1,6),dtype=torch.long)
+    comma_id=tokenizer.model.token_to_index(",")
+    # Match export_components.py's deterministic reference fixtures exactly:
+    # 3/1/7 comma tokens and 48/64/96 source frames with torch.manual_seed(0).
+    for case,(tail_len,frames) in enumerate(((3,48),(1,64),(7,96))):
+        tail=torch.full((1,tail_len),comma_id,dtype=torch.long)
         full=torch.cat((prefix,tail),dim=1)
         encoded=torch.randn(1,frames,model.text_decoder.model_dim)
         encoded_np=encoded.numpy()
