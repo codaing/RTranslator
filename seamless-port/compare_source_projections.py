@@ -30,7 +30,20 @@ def main(directory,features,output):
             info["decision_match"]=len(a)==len(b) and all(
                 x["token"]==y["token"] and (x["p_choose"]>=0.5)==(y["p_choose"]>=0.5)
                 for x,y in zip(a,b))
-            info["eligible"]=bool(code==0 and baseline["result"]=="PASS" and info["token_match"] and info["duration_match"] and info["decision_match"])
+            info["waveform_nrms"]=None
+            if info["duration_match"] and code==0 and baseline["result"]=="PASS":
+                with wave.open(str(output/"original.wav"),"rb") as w:
+                    x=np.frombuffer(w.readframes(w.getnframes()),"<i2").astype(np.float64)
+                with wave.open(str(output/"projected.wav"),"rb") as w:
+                    y=np.frombuffer(w.readframes(w.getnframes()),"<i2").astype(np.float64)
+                if x.shape==y.shape and x.size:
+                    info["waveform_nrms"]=float(np.linalg.norm(x-y)/max(np.linalg.norm(x),1))
+            info["processing_rtf_original"]=baseline["processing_real_time_factor"]
+            info["processing_rtf_candidate"]=data["processing_real_time_factor"]
+            info["eligible"]=bool(code==0 and baseline["result"]=="PASS" and info["token_match"]
+                and info["duration_match"] and info["decision_match"]
+                and info["waveform_nrms"] is not None and info["waveform_nrms"]<=.02
+                and info["processing_rtf_candidate"]<info["processing_rtf_original"])
         results.append(info)
         print(json.dumps(info),flush=True)
         (output/"comparison.json").write_text(json.dumps(results,indent=2)+"\n")

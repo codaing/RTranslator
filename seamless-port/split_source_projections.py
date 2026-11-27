@@ -26,7 +26,27 @@ def deps(node):
             for g in a.graphs:names.update(free_inputs(g))
     return names
 
-def partition(model):
+def infer_types(model,base_dir):
+    # The real FP16 export has externalized small integer reshape operands.
+    # Load only small shape tensors into an isolated metadata copy, never
+    # the large floating-point checkpoint weights.
+    from onnx.external_data_helper import load_external_data_for_tensor
+    from model_pack import tensors
+    from onnx import TensorProto as T
+    import math
+    work=copy.deepcopy(model)
+    count=0
+    for t in tensors(work.graph):
+        if t.data_location==T.EXTERNAL and t.data_type in (T.INT64,T.INT32,T.BOOL) and math.prod(t.dims)<=65536:
+            load_external_data_for_tensor(t,str(base_dir))
+            t.ClearField("external_data");t.data_location=T.DEFAULT
+            count+=1
+    print("loaded external shape tensors",count,flush=True)
+    inferred=onnx.shape_inference.infer_shapes(work,strict_mode=False,data_prop=True)
+    types={v.name:v for v in list(inferred.graph.input)+list(inferred.graph.value_info)+list(inferred.graph.output)}
+    return work,types
+
+def partition(model,base_dir="."):
     g=model.graph
     initializers={x.name:x for x in g.initializer}
     inputs={x.name:x for x in g.input}
@@ -76,13 +96,30 @@ def partition(model):
     main_nodes=required
     boundary=sorted(source_outputs & (set().union(*(deps(g.node[i]) for i in main_nodes))|{x.name for x in g.output}))
     if not boundary:raise ValueError("no live source projection boundary")
-    # Shape inference reads graph metadata only, never materializes weights.
-    inferred=onnx.shape_inference.infer_shapes(model,strict_mode=False,data_prop=False)
-    types={v.name:v for v in list(inferred.graph.input)+list(inferred.graph.value_info)+list(inferred.graph.output)}
-    for name in boundary:
-        vi=types.get(name)
-        if vi is None or not vi.type.tensor_type.elem_type or not vi.type.tensor_type.HasField("shape"):
-            raise ValueError("missing inferred boundary type: "+name)
+    work,types=infer_types(model,base_dir)
+    def valid(v):
+        return v is not None and v.type.tensor_type.elem_type and v.type.tensor_type.HasField("shape")
+    missing=[name for name in boundary if not valid(types.get(name))]
+    if missing:
+        print("standard inference missing",missing,flush=True)
+        # Isolate the source subgraph, with only the original encoded input.
+        # Symbolic inference works on the unmaterialized large weights; use
+        # inferred rank/dtype only, discard symbolic dimension expressions.
+        from onnxruntime.tools.symbolic_shape_infer import SymbolicShapeInference
+        nodes=[work.graph.node[i] for i in sorted(source_needed)]
+        used=set().union(*(deps(n) for n in nodes))
+        small=copy.deepcopy(work)
+        small.graph.CopyFrom(h.make_graph(nodes,"source_shape_probe",[inputs["encoded"]],
+            [h.make_empty_tensor_value_info(n) for n in boundary],
+            [t for t in work.graph.initializer if t.name in used]))
+        sym=SymbolicShapeInference.infer_shapes(small,auto_merge=True,guess_output_rank=False)
+        for v in list(sym.graph.value_info)+list(sym.graph.output):
+            if valid(v) and not valid(types.get(v.name)):
+                shape=[d.dim_value if d.HasField("dim_value") else None for d in v.type.tensor_type.shape.dim]
+                types[v.name]=h.make_tensor_value_info(v.name,v.type.tensor_type.elem_type,shape)
+    missing=[name for name in boundary if not valid(types.get(name))]
+    if missing:raise ValueError("missing inferred boundary types: "+str(missing))
+    print("boundary types",[(n,types[n].type.tensor_type.elem_type,len(types[n].type.tensor_type.shape.dim)) for n in boundary],flush=True)
     def build(indices,graph_inputs,graph_outputs,name):
         nodes=[g.node[i] for i in sorted(indices)]
         used=set().union(*(deps(n) for n in nodes))
@@ -107,7 +144,7 @@ def main(directory):
     directory=Path(directory)
     graph=directory/"decoder.incremental.fp16.onnx"
     model=onnx.load(str(graph),load_external_data=False)
-    source,decoder,report=partition(model)
+    source,decoder,report=partition(model,directory)
     for name,m in (("decoder.source-projections.onnx",source),("decoder.cached-step.onnx",decoder)):
         path=directory/name
         onnx.save_model(m,str(path))
