@@ -71,6 +71,10 @@ def main():
             features = torch.randn(1, tokens.shape[1], model.model_dim)
             out, _, durations = model(features, None, tokens.clone(), duration_factor=1.0)
             cases.append(((features, chars, lens), (out.logits, durations)))
+            np.savez(directory / f"units.case{len(cases)-1}.npz",
+                     input_features=features.numpy(), input_chars=chars.numpy(),
+                     input_char_lens=lens.numpy(), output_logits=out.logits.numpy(),
+                     output_durations=durations.numpy())
         # Replace only the hard-upsampling implementations, preserving trained parameters.
         front = model.decoder_frontend
         front.char_length_regulator = DynamicUpsampling()

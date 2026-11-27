@@ -35,7 +35,7 @@ def map_chars(tokens,meta):
     return np.array([chars],dtype=np.int64),np.array([lengths],dtype=np.int64)
 
 
-def run(directory,fbank,out):
+def run(directory,fbank,out,update_frames=64):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -65,20 +65,36 @@ def run(directory,fbank,out):
     times=[]
     start=time.monotonic()
 
+    phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0}
+    decoder_calls=0
+    decoder_input_tokens=0
     def predict(ids,encoded):
+        nonlocal decoder_calls,decoder_input_tokens
+        t0=time.monotonic()
         logits,feats,choose=dec.run(["logits","features","p_choose"],
                 {"tokens":np.array([ids],np.int64),"encoded":encoded})
+        phase_totals["decoder_seconds"]+=time.monotonic()-t0
+        decoder_calls+=1
+        decoder_input_tokens+=len(ids)
         if not all(np.isfinite(x).all() for x in (logits,feats,choose)):
             raise RuntimeError("non-finite decoder output")
         return int(logits[0,-1].argmax()),float(choose[...,-1,-1].min()),feats
 
+    if update_frames<32 or update_frames>160 or update_frames%32:
+        raise ValueError("update_frames must be a multiple of 32 between 32 and 160")
     end=len(features)&~1
-    # 320ms transport cadence, preserving the entire input prefix.
-    for count in list(range(192,end,32))+[end]:
+    # Transport frames remain 320 ms. Inference cadence can be coarser without
+    # dropping audio; each call still receives the complete accumulated prefix.
+    for count in list(range(192,end,update_frames))+[end]:
         t0=time.monotonic()
         finished=count==end
+        phase_start=time.monotonic()
         encoded=enc.run(["encoded"],{"fbank":features[None,:count,:]})[0]
+        enc_elapsed=time.monotonic()-phase_start
+        phase_totals["encoder_seconds"]+=enc_elapsed
         old=len(tokens)
+        decoder_before=phase_totals["decoder_seconds"]
+        units_elapsed=vocoder_elapsed=0.0
         for _ in range(50):
             tok,p,_=predict(tokens,encoded)
             if tok==meta["eos"] or (not finished and p<0.5):break
@@ -88,7 +104,10 @@ def run(directory,fbank,out):
             ids=tokens+[meta["comma"]]
             chars,lengths=map_chars(ids,meta)
             _,_,feats=predict(ids,encoded)
+            phase_start=time.monotonic()
             logits,durations=unit.run(["logits","durations"],{"features":feats,"chars":chars,"char_lens":lengths})
+            units_elapsed=time.monotonic()-phase_start
+            phase_totals["units_seconds"]+=units_elapsed
             d=durations[0]
             if duration_start>len(d) or np.any(d<0):raise RuntimeError("invalid duration context")
             offset=int(d[:duration_start].sum())
@@ -97,12 +116,20 @@ def run(directory,fbank,out):
                 ids=logits[0,offset:].argmax(-1)
                 ids=np.where((ids==1)|(ids==2),5,ids)-4
                 if np.any(ids<0) or np.any(ids>=10000):raise RuntimeError("invalid acoustic unit")
+                phase_start=time.monotonic()
                 pcm=voc.run(["waveform"],{"units":ids[None,:].astype(np.int64)})[0].reshape(-1)
+                vocoder_elapsed=time.monotonic()-phase_start
+                phase_totals["vocoder_seconds"]+=vocoder_elapsed
                 if not np.isfinite(pcm).all() or len(pcm)==0:raise RuntimeError("invalid waveform")
                 waves.append(pcm)
                 if first_audio is None:first_audio={"source_seconds":count/100,"before_eof":not finished,"wall_seconds":time.monotonic()-start}
                 duration_start=max(0,len(d)-1)
-        times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,"tokens":len(tokens)-2,"rss_mib":rss_mib()})
+        step_decoder=phase_totals["decoder_seconds"]-decoder_before
+        times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,
+                      "encoder_seconds":enc_elapsed,"decoder_seconds":step_decoder,
+                      "units_seconds":units_elapsed,"vocoder_seconds":vocoder_elapsed,
+                      "decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
+                      "tokens":len(tokens)-2,"rss_mib":rss_mib()})
         print(times[-1],flush=True)
     pcm=np.concatenate(waves) if waves else np.array([],np.float32)
     if len(pcm):
@@ -113,6 +140,8 @@ def run(directory,fbank,out):
     success=bool(first_audio and first_audio["before_eof"] and len(pcm)>=8000 and np.sqrt(np.mean(pcm**2))>1e-5 and len(tokens)>4)
     result={"result":"PASS" if success else "FAIL","scope":"host waveform smoke only, not translation quality or Android speed",
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
+       "update_frames":update_frames,"update_interval_ms":update_frames*10,
+       "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
        "first_audio":first_audio,"token_ids":tokens,"steps":times}
     (directory/"speech-smoke.json").write_text(json.dumps(result,indent=2)+"\n")
@@ -121,4 +150,5 @@ def run(directory,fbank,out):
 
 if __name__=="__main__":
     p=argparse.ArgumentParser();p.add_argument("directory");p.add_argument("features");p.add_argument("output")
-    a=p.parse_args();run(a.directory,a.features,a.output)
+    p.add_argument("--update-frames",type=int,default=64)
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames)

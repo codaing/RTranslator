@@ -8,7 +8,7 @@ import java.util.*;
 /** Experimental full-prefix Seamless streaming inference. Single worker owns sessions. */
 final class StreamingEngine implements AutoCloseable {
     interface Sink { void audio(float[] samples) throws Exception; }
-    static final int MAX_FRAMES=6000, MIN_FRAMES=192, MAX_TOKENS=100;
+    static final int MAX_FRAMES=6000, MIN_FRAMES=192, UPDATE_INTERVAL_FRAMES=64, MAX_TOKENS=100;
     private final OrtEnvironment env=OrtEnvironment.getEnvironment();
     private OrtSession encoder,decoder,units;
     private EnglishUnitVocoder vocoder;
@@ -79,7 +79,8 @@ final class StreamingEngine implements AutoCloseable {
         frames.addAll(fbank.push(pcm));
         if(frames.size()>MAX_FRAMES)throw new IllegalStateException("60-second experimental context limit reached; no audio silently discarded");
         int count=frames.size()&~1;
-        if(count<2||(!finished&&count<MIN_FRAMES)||(!finished&&count==lastFrameCount))return;
+        if(count<2||(!finished&&count<MIN_FRAMES)||
+                (!finished&&count-lastFrameCount<UPDATE_INTERVAL_FRAMES))return;
         lastFrameCount=count;
         float[][][] encoded;
         try(OnnxTensor x=OnnxTensor.createTensor(env,new float[][][]{frames.subList(0,count).toArray(new float[0][])});
