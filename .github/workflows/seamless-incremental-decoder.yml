@@ -41,8 +41,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install Android-matching native INT8 runtime
-        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
+      - name: Install Android-matching ORT and FP16 converter
+        run: python -m pip install 'numpy<2' 'onnxruntime==1.30.0' 'onnx==1.20.1' 'onnxconverter-common==1.16.0'
+      - name: Convert incremental decoder to FP16 and validate
+        id: fp16
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python -u seamless-port/fp16_incremental_candidate.py model-check 2>&1 | tee model-check/incremental-fp16.log
+      - name: Upload validated incremental FP16 graph
+        if: steps.fp16.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-incremental-FP16-experimental
+          path: |
+            model-check/decoder.incremental.fp16.onnx
+            model-check/decoder.incremental.fp16.onnx.weights
+            model-check/decoder.incremental.fp16.validated.json
+            model-check/decoder.incremental.meta.json
+          compression-level: 0
+          retention-days: 3
       - name: Quantize and validate incremental cache graph
         id: validate
         run: |
