@@ -41,6 +41,9 @@ jobs:
             python -u seamless-port/export_components.py vocoder model-check
           fi
           test -s "model-check/${{ matrix.component }}.validated.json"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install Android-matching ORT and FP16 converter
         run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' 'onnxconverter-common==1.14.0'
       - name: Convert and validate FP16 candidate on CPU EP
