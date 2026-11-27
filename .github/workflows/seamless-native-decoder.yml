@@ -4,6 +4,8 @@ on:
     branches: [seamless-streaming]
     paths:
       - '.github/workflows/seamless-native-decoder.yml'
+      - 'seamless-port/native8_probe.py'
+      - 'seamless-port/weight_only_int8.py'
   workflow_dispatch:
 permissions:
   contents: read

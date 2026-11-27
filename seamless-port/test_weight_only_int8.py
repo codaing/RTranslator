@@ -53,5 +53,22 @@ class TestWeightOnly(unittest.TestCase):
             expected=x@weight@other
             self.assertLess(np.linalg.norm(actual-expected)/np.linalg.norm(expected),0.03)
 
+    def test_native_graph_preserves_node_outputs_and_compacts_weights(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp);src=p/"source.onnx";out=p/"native.onnx"
+            w=np.ones((32,4),np.float32)
+            graph=h.make_graph([h.make_node("MatMul",["x","w"],["y"],name="test")],
+                "probe",[h.make_tensor_value_info("x",T.FLOAT,[1,32])],
+                [h.make_tensor_value_info("y",T.FLOAT,[1,4])],[nh.from_array(w,name="w")])
+            model=h.make_model(graph,opset_imports=[h.make_opsetid("",17)],ir_version=9)
+            onnx.save_model(model,str(src))
+            for asym in (False,True):
+                convert(src,out,["test"],group=16,native=True,asymmetric=asym)
+                g=onnx.load(str(out),load_external_data=False).graph
+                self.assertEqual(g.node[0].op_type,"MatMulNBits")
+                self.assertEqual(list(g.node[0].output),["y"])
+                self.assertEqual(len(g.node[0].input),4 if asym else 3)
+                self.assertNotIn("w",[t.name for t in g.initializer])
+
 if __name__=="__main__":
     unittest.main()

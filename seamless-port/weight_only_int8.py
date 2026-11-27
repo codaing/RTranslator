@@ -87,7 +87,7 @@ def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
                 if weight.dtype!=np.float32:raise ValueError("expected FP32 weight")
                 tag="weight_only/"+str(len(replacements))
                 if native:
-                    k,n=weight.shape
+                    k,nout=weight.shape
                     if asymmetric:
                         blocks=np.ascontiguousarray(weight.T).reshape(-1,group)
                         lo=np.minimum(blocks.min(axis=1),0)
@@ -103,12 +103,12 @@ def convert(source,output,selected,group=GROUP,native=False,asymmetric=False):
                         z=None
                     qn,sn,zn=[tag+x for x in ("/packed","/scale","/zero")]
                     if any(x in names for x in (qn,sn,zn)):raise ValueError("name collision")
-                    append_array(qn,q.reshape(n,k//group,group))
+                    append_array(qn,q.reshape(nout,k//group,group))
                     append_array(sn,s.reshape(-1))
                     extra=[qn,sn]
                     if z is not None:
                         append_array(zn,z.reshape(-1));extra.append(zn)
-                    native_inputs[weight_name]=(extra,k,n)
+                    native_inputs[weight_name]=(extra,k,nout)
                     replacements[weight_name]=qn
                     del weight,q,s,z
                 else:
