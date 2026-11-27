@@ -45,7 +45,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install Android-matching ORT and FP16 converter
-        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' 'onnxconverter-common==1.14.0'
+        run: python -m pip install 'numpy<2' 'onnxruntime==1.30.0' 'onnx==1.20.1' 'onnxconverter-common==1.16.0'
       - name: Convert and validate FP16 candidate on CPU EP
         id: convert
         run: python -u seamless-port/fp16_candidate.py "${{ matrix.component }}" model-check
