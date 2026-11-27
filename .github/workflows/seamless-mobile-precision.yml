@@ -1,0 +1,67 @@
+name: FP16 acoustic model size and CPU compatibility experiment
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless-port/fp16_candidate.py'
+      - 'seamless-port/export_units.py'
+      - 'seamless-port/export_components.py'
+      - '.github/workflows/seamless-mobile-precision.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  precision:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [units, vocoder]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pinned reference and export runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 ffmpeg
+          python -m pip install 'numpy<2' 'torch==2.1.1' 'torchaudio==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless 'onnx==1.16.2' 'onnxruntime==1.18.1'
+      - name: Export FP32 acoustic component and independent fixtures
+        run: |
+          mkdir -p model-check
+          if [[ "${{ matrix.component }}" == units ]]; then
+            python -u seamless-port/export_units.py model-check
+          else
+            python -u seamless-port/export_components.py vocoder model-check
+          fi
+          test -s "model-check/${{ matrix.component }}.validated.json"
+      - name: Install Android-matching ORT and FP16 converter
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' 'onnxconverter-common==1.14.0'
+      - name: Convert and validate FP16 candidate on CPU EP
+        id: convert
+        run: python -u seamless-port/fp16_candidate.py "${{ matrix.component }}" model-check
+      - name: Upload FP16 experiment report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fp16-${{ matrix.component }}-validation-report
+          path: model-check/${{ matrix.component }}.fp16.validated.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload validated FP16 component candidate
+        if: steps.convert.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-${{ matrix.component }}-FP16-experimental
+          path: |
+            model-check/${{ matrix.component }}.fp16.onnx
+            model-check/${{ matrix.component }}.fp16.onnx.weights
+            model-check/${{ matrix.component }}.fp16.validated.json
+          compression-level: 0
+          retention-days: 3

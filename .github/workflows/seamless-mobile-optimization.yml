@@ -1,0 +1,84 @@
+name: Seamless 640ms inference cadence speech benchmark
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless-port/speech_smoke.py'
+      - 'seamless/src/main/java/nie/translator/seamless/StreamingEngine.java'
+      - '.github/workflows/seamless-mobile-optimization.yml'
+  workflow_dispatch:
+    inputs:
+      baseline_run_id:
+        description: 'Successful full model package workflow run ID'
+        type: string
+        default: '45956345415'
+      update_frames:
+        description: 'Inference cadence in 10 ms filterbank frames (64 = 640 ms)'
+        type: choice
+        options: ['32','64','96']
+        default: '64'
+permissions:
+  contents: read
+  actions: read
+env:
+  BASELINE_RUN_ID: ${{ inputs.baseline_run_id || '45956345415' }}
+  UPDATE_FRAMES: ${{ inputs.update_frames || '64' }}
+jobs:
+  speech-cadence:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-INT8-experimental-model-pack
+          path: model-artifact
+          run-id: ${{ env.BASELINE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Extract previously validated model pack
+        run: |
+          find model-artifact -maxdepth 2 -type f -printf '%p %s bytes\n'
+          INNER=$(find model-artifact -name 'seamless-int8-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models
+          unzip -q "$INNER" -d models
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Prepare the same Mandarin source and Java filterbanks
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg libsndfile1
+          python -m pip install 'numpy<2' 'torch==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          python seamless-port/check_fbank.py speech-input/mandarin.pcm speech-input/fbank.bin fbank-check.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android-matching runtime
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
+      - name: Run full-prefix speech benchmark at selected cadence
+        run: |
+          mkdir -p speech-reports
+          python -u seamless-port/speech_smoke.py models speech-input/fbank.bin speech-reports/translated.wav --update-frames "$UPDATE_FRAMES" 2>&1 | tee speech-reports/smoke.log
+          cat models/speech-smoke.json
+      - name: Upload cadence diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seamless-640ms-cadence-benchmark
+          path: |
+            models/speech-smoke.json
+            speech-reports/
+            fbank-check.json
+          if-no-files-found: warn
+          retention-days: 7

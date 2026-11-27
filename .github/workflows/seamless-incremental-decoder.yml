@@ -1,0 +1,64 @@
+name: Incremental decoder KV-cache INT8 experiment
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - 'seamless-port/incremental_decoder.py'
+      - 'seamless-port/validate_incremental_int8.py'
+      - 'seamless-port/weight_only_int8.py'
+      - 'seamless-port/quantize_int8.py'
+      - '.github/workflows/seamless-incremental-decoder.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  incremental:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install pinned reference and FP32 ONNX runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsndfile1 ffmpeg
+          python -m pip install 'numpy<2' 'torch==2.1.1' 'torchaudio==2.1.1' --extra-index-url https://download.pytorch.org/whl/cpu
+          python -m pip install 'fairseq2==0.2.1' --extra-index-url https://fair.pkg.atmeta.com/fairseq2/whl/pt2.1.1/cpu
+          git clone https://github.com/facebookresearch/seamless_communication.git /tmp/meta-seamless
+          git -C /tmp/meta-seamless checkout 9a081e935c29c6b1e0e05bcbf3fcb623ad306524
+          python -m pip install -e /tmp/meta-seamless 'onnx==1.16.2' 'onnxruntime==1.18.1'
+      - name: Export one-graph KV cache and compare every token to full-prefix reference
+        run: |
+          mkdir -p model-check
+          python -u seamless-port/incremental_decoder.py model-check 2>&1 | tee model-check/incremental-fp32.log
+          test -s model-check/decoder.incremental.fp32.validated.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Android-matching native INT8 runtime
+        run: python -m pip install 'onnxruntime==1.30.0' 'onnx==1.20.1' numpy
+      - name: Quantize and validate incremental cache graph
+        id: validate
+        run: python -u seamless-port/validate_incremental_int8.py model-check 2>&1 | tee model-check/incremental-int8.log
+      - name: Upload incremental parity reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: incremental-decoder-validation-reports
+          path: model-check/decoder.incremental*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Upload validated incremental INT8 graph
+        if: steps.validate.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-incremental-native-INT8-experimental
+          path: |
+            model-check/decoder.incremental.native8.onnx
+            model-check/decoder.incremental.native8.onnx.weights
+            model-check/decoder.incremental.native8.validated.json
+            model-check/decoder.incremental.meta.json
+          compression-level: 0
+          retention-days: 3
