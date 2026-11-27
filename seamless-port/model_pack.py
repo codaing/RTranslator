@@ -15,7 +15,7 @@ NOTICE="""SeamlessStreaming model weights: Meta Platforms, Inc.
 Converted from facebookresearch/seamless_communication, revision 9a081e935c29c6b1e0e05bcbf3fcb623ad306524.
 Model weights licensed CC BY-NC 4.0: https://creativecommons.org/licenses/by-nc/4.0/
 Source: https://github.com/facebookresearch/seamless_communication
-Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and decoder.
+Modifications: ONNX export, dynamic graph repair, INT8 weight quantization of encoder and selective mixed-precision decoder projections.
 Noncommercial use only. Experimental conversion; no warranty.
 """
 

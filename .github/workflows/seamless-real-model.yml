@@ -66,9 +66,10 @@ jobs:
           fi
           test -s "model-check/${{ matrix.component }}.validated.json"
       - name: Quantize and compare INT8
+        timeout-minutes: 100
         if: matrix.component == 'encoder' || matrix.component == 'decoder'
         run: |
-          python seamless-port/quantize_int8.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/int8.log
+          python -u seamless-port/quantize_int8.py "${{ matrix.component }}" model-check 2>&1 | tee model-check/int8.log
           test -s "model-check/${{ matrix.component }}.int8.validated.json"
       - name: Upload model validation reports (not weights)
         if: always()
