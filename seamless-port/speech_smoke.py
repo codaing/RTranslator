@@ -59,12 +59,13 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
     if len(features)<400:raise ValueError("need >4 seconds of speech")
-    opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
+    if threads<1 or threads>8:raise ValueError("threads must be 1..8")
+    opts=ort.SessionOptions();opts.intra_op_num_threads=threads;opts.inter_op_num_threads=1
     incremental_path=directory/"decoder.incremental.fp16.onnx"
     incremental=incremental_path.is_file()
     if source_projections and not incremental:raise ValueError("projection cache requires incremental decoder")
@@ -72,7 +73,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
     decoder_meta=json.loads((directory/"decoder.incremental.meta.json").read_text()) if incremental else None
     start=time.monotonic()
     from decoder_session import configure_native,configure_fp16
-    decoder_opts=ort.SessionOptions();decoder_opts.intra_op_num_threads=4;decoder_opts.inter_op_num_threads=1
+    decoder_opts=ort.SessionOptions();decoder_opts.intra_op_num_threads=threads;decoder_opts.inter_op_num_threads=1
     if incremental:
         configure_fp16(decoder_opts,session_profile)
         configure_fp16(opts,session_profile)
@@ -202,6 +203,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
        "architecture":platform.machine(),"ort_version":ort.__version__,"numpy_version":np.__version__,
        "fbank_sha256":hashlib.sha256(Path(fbank).read_bytes()).hexdigest(),"prefill_decisions":decisions,
        "load_seconds":load_time,"input_seconds":end/100,"output_seconds":len(pcm)/16000,
+       "intra_op_threads":threads,"processing_real_time_factor":(elapsed-load_time)/(end/100),
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
@@ -215,4 +217,5 @@ if __name__=="__main__":
     p.add_argument("--update-frames",type=int,default=64)
     p.add_argument("--session-profile",choices=("default","no-retention","basic-no-retention"),default="default")
     p.add_argument("--source-projections",action="store_true")
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections)
+    p.add_argument("--threads",type=int,default=4)
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads)

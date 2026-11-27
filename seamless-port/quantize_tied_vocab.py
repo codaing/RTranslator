@@ -66,7 +66,17 @@ def rewrite(model,vocab,group):
     prefix="tied8_"
     names={x.name for x in g.initializer}|{x.name for x in g.input}|{o for n in g.node for o in n.output}
     if any(x.startswith(prefix) for x in names):raise ValueError("name collision")
-    def n(op,inputs,output,**kw):return h.make_node(op,inputs,[output],name=output,**kw)
+    # ONNX tensor names and node names are independent namespaces. In the
+    # real FP16 graph an existing Cast node has the name of the preceding
+    # MatMul output. Never derive a new node name from that output.
+    node_names={n.name for n in g.node if n.name}
+    def unique_node(label):
+        name="tied8_node_"+label
+        while name in node_names:name+="_"
+        node_names.add(name)
+        return name
+    def n(op,inputs,output,**kw):
+        return h.make_node(op,inputs,[output],name=unique_node(str(len(node_names))),**kw)
     e=g.node[ei];p=g.node[pi]
     en=[
         n("Gather",["tied8_q","tokens"],"tied8_rows",axis=0),
@@ -81,7 +91,7 @@ def rewrite(model,vocab,group):
     pn=[
         n("Cast",[p.input[0]],"tied8_projection_input",to=T.FLOAT),
         h.make_node("MatMulNBits",["tied8_projection_input","tied8_q","tied8_scales"],
-                    ["tied8_projection_float"],name="tied8_projection",domain="com.microsoft",
+                    ["tied8_projection_float"],name=unique_node("projection"),domain="com.microsoft",
                     K=dim,N=vocab,bits=8,block_size=group,accuracy_level=0),
         n("Cast",["tied8_projection_float"],p.output[0],to=pd)]
     nodes=[]
@@ -89,6 +99,8 @@ def rewrite(model,vocab,group):
         if i==ei:nodes.extend(en)
         elif i==pi:nodes.extend(pn)
         elif i not in chain:nodes.append(node)
+    named=[n.name for n in nodes if n.name]
+    if len(named)!=len(set(named)):raise ValueError("duplicate node names after tied rewrite")
     g.ClearField("node");g.node.extend(nodes)
     original=copy.deepcopy(weight)
     g.initializer.remove(weight)

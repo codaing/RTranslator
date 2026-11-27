@@ -10,13 +10,16 @@ class TiedVocabularyTest(unittest.TestCase):
         w=rng.normal(size=(32,64)).astype(np.float32)
         g=h.make_graph([h.make_node("Gather",["w","tokens"],["features"]),
             h.make_node("Transpose",["w"],["wt"],perm=[1,0]),
-            h.make_node("MatMul",["features","wt"],["logits"])],
+            h.make_node("MatMul",["features","wt"],["projection_output"]),
+            h.make_node("Cast",["projection_output"],["logits"],name="projection_output",to=T.FLOAT)],
             "tiny",[h.make_tensor_value_info("tokens",T.INT64,[1,None])],
             [h.make_tensor_value_info("features",T.FLOAT,[1,None,64]),
              h.make_tensor_value_info("logits",T.FLOAT,[1,None,32])],
             [nh.from_array(w,name="w")])
         m=h.make_model(g,opset_imports=[h.make_opsetid("",17)],ir_version=9)
         rewrite(m,32,64)
+        names=[n.name for n in m.graph.node if n.name]
+        self.assertEqual(len(names),len(set(names)))
         q,s=quantize_rows(w,64)
         m.graph.initializer.extend([nh.from_array(q,name="tied8_q"),
                                    nh.from_array(s.reshape(-1),name="tied8_scales")])
