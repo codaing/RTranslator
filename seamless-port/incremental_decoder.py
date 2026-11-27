@@ -92,7 +92,7 @@ def main(directory):
     start=time.monotonic()
     torch.onnx.export(wrapper,(sample_tokens,sample_encoded,torch.tensor([0],dtype=torch.long),*empty),
         str(target),input_names=names+past_names,output_names=output_names,
-        dynamic_axes=dynamic,opset_version=17,do_constant_folding=False,external_data=True)
+        dynamic_axes=dynamic,opset_version=17,do_constant_folding=False)
     onnx.checker.check_model(str(target))
     print(f"Exported incremental graph in {time.monotonic()-start:.1f}s ({target.stat().st_size:,} graph bytes)",flush=True)
     opts=ort.SessionOptions();opts.intra_op_num_threads=4;opts.inter_op_num_threads=1
