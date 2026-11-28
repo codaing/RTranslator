@@ -60,7 +60,16 @@ public class RuntimeTest {
     @Test public void projectedDecoderReusesNativeFp16Tensors() throws Exception {
         chain("test-projected-pack.zip",true,false);
     }
+    @Test public void webGpuProjectedChainPreservesSyntheticAudio() throws Exception {
+        assertTrue(GpuTuning.DECODER.uses(DecoderCache.SOURCE));
+        assertTrue(GpuTuning.DECODER.uses(DecoderCache.STEP));
+        assertFalse(GpuTuning.DECODER.uses("encoder.int8.onnx"));
+        chain("test-projected-pack.zip",true,false,GpuTuning.DECODER);
+    }
     private void chain(String pack,boolean cached,boolean quiet)throws Exception{
+        chain(pack,cached,quiet,GpuTuning.CPU);
+    }
+    private void chain(String pack,boolean cached,boolean quiet,GpuTuning gpu)throws Exception{
         // Synthetic graphs validate application wiring, not translation quality.
         android.content.Context context=InstrumentationRegistry.getInstrumentation().getContext();
         File parent=new File(InstrumentationRegistry.getInstrumentation().getTargetContext().getCacheDir(),"stream-test");
@@ -72,7 +81,7 @@ public class RuntimeTest {
             assertEquals(cached,ModelPack.incremental(dir));
             assertTrue(new File(dir,"encoder.int8.onnx.weights").isFile());
             java.util.List<float[]> output=new java.util.ArrayList<>();
-            try(StreamingEngine engine=new StreamingEngine(dir,false,false,false,quiet)){
+            try(StreamingEngine engine=new StreamingEngine(dir,false,false,false,quiet,gpu)){
                 boolean projected=pack.equals("test-projected-pack.zip");
                 assertEquals(projected,ModelPack.projected(dir));
                 assertEquals(projected?"incremental-fp16-source-projections":cached?"incremental-fp16-kv-cache":"full-prefix-int8",engine.decoderMode());

@@ -23,10 +23,12 @@ final class StreamingEngine implements AutoCloseable {
     private final boolean xnnpackFp32Stages;
     private final boolean nnapiEncoder;
     private final boolean quietCpu;
+    private final GpuTuning gpu;
     final StageStats stats=new StageStats();
     private final ContextBoundary boundary=new ContextBoundary();
     int contextFrames(){return frames.size();}
     int targetTokens(){return accepted.size()-tokens.prefix.length;}
+    String tokenFingerprint(){return GpuTuning.fingerprint(prefix(false));}
     int rollovers(){return rollovers;}
     StreamingEngine(File dir,boolean adaptive)throws Exception{
         this(dir,adaptive,false,false,false);
@@ -35,7 +37,14 @@ final class StreamingEngine implements AutoCloseable {
         this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,false);
     }
     StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu)throws Exception{
-        this.adaptive=adaptive;this.quietCpu=quietCpu;
+        this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,quietCpu,GpuTuning.CPU);
+    }
+    StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu)throws Exception{
+        this.adaptive=adaptive;this.quietCpu=quietCpu;this.gpu=Objects.requireNonNull(gpu);
+        if(gpu!=GpuTuning.CPU&&(xnnpackFp32Stages||nnapiEncoder))
+            throw new IllegalArgumentException("Disable XNNPACK and NNAPI for WebGPU comparisons");
+        gpu.requireAvailable();
+        android.util.Log.i("SeamlessModels","benchmark GPU profile="+gpu);
         this.xnnpackFp32Stages=xnnpackFp32Stages;
         this.nnapiEncoder=nnapiEncoder;
         tokens=new TokenMetadata(new File(dir,"tokenizer.json"));
@@ -51,7 +60,7 @@ final class StreamingEngine implements AutoCloseable {
                 cacheLayout.check(decoder,projection);
             }else decoder=open(dir,"decoder.int8.onnx");
             units=open(dir,"units.onnx");
-            vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath(),quietCpu);
+            vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath(),quietCpu,gpu);
         }catch(Exception|OutOfMemoryError e){try{close();}catch(Exception ignored){}throw e;}
     }
     private OrtSession open(File dir,String name)throws OrtException{
@@ -79,6 +88,7 @@ final class StreamingEngine implements AutoCloseable {
                 o.addXnnpack(Collections.singletonMap("intra_op_num_threads","4"));
                 android.util.Log.i("SeamlessModels","XNNPACK requested for "+name);
             }
+            gpu.configure(o,name);
             long start=android.os.SystemClock.elapsedRealtime();
             OrtSession session=env.createSession(new File(dir,name).getAbsolutePath(),o);
             android.util.Log.i("SeamlessModels","loaded "+name+" in "+(android.os.SystemClock.elapsedRealtime()-start)+" ms, PSS="+android.os.Debug.getPss()+" KiB");

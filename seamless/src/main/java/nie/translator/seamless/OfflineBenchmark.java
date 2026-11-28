@@ -12,6 +12,10 @@ import android.os.SystemClock;
 final class OfflineBenchmark {
     static String run(File dir,InputStream in,BooleanSupplier cancelled,LiveAudio.Status status,
                       boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu)throws Exception{
+        return run(dir,in,cancelled,status,xnnpackFp32Stages,nnapiEncoder,quietCpu,GpuTuning.CPU);
+    }
+    static String run(File dir,InputStream in,BooleanSupplier cancelled,LiveAudio.Status status,
+                      boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu)throws Exception{
         short[] samples=BenchmarkWav.read(in);
         if(cancelled.getAsBoolean())throw new CancellationException("Cancelled");
         status.report("Benchmark: loading real model sessions…");
@@ -21,10 +25,10 @@ final class OfflineBenchmark {
         final boolean[] eof={false},beforeEof={false};
         final double[] energy={0};
         long computeStart;
-        int tokens;String decoderMode,stageReport;
+        int tokens;String decoderMode,stageReport,tokenFingerprint;
         long pushNanos=0,pssNanos=0,closeStart;
         long pssStart;
-        try(StreamingEngine engine=new StreamingEngine(dir,false,xnnpackFp32Stages,nnapiEncoder,quietCpu)){
+        try(StreamingEngine engine=new StreamingEngine(dir,false,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu)){
             load=SystemClock.elapsedRealtime()-start;
             peak[0]=Math.max(peak[0],Debug.getPss());
             computeStart=SystemClock.elapsedRealtime();
@@ -56,7 +60,7 @@ final class OfflineBenchmark {
             pssStart=System.nanoTime();
             peak[0]=Math.max(peak[0],Debug.getPss());
             pssNanos+=System.nanoTime()-pssStart;
-            tokens=engine.targetTokens();decoderMode=engine.decoderMode();
+            tokens=engine.targetTokens();decoderMode=engine.decoderMode();tokenFingerprint=engine.tokenFingerprint();
             stageReport=engine.stats.report();closeStart=System.nanoTime();
         }
         long elapsed=SystemClock.elapsedRealtime()-computeStart;
@@ -65,6 +69,8 @@ final class OfflineBenchmark {
             android.os.Build.MODEL,android.os.Build.VERSION.RELEASE,decoderMode,nnapiEncoder,xnnpackFp32Stages,quietCpu,duration,generated[0]/16000.0,load/1000.0,elapsed/1000.0,rtf,
             first[0]<0?"none":String.format(Locale.US,"%.2f s",first[0]/1000.0),firstSource[0]<0?"none":String.format(Locale.US,"%.2f s",firstSource[0]/16000.0),beforeEof[0]?"yes":"no",
             peak[0]/1024.0,tokens,generated[0]>0?Math.sqrt(energy[0]/generated[0]):0)
+            +"\nWebGPU requested stages: "+gpu+" (unsupported nodes may execute on CPU)"
+            +"\nToken SHA-256: "+tokenFingerprint
             +"\n\n"+stageReport+String.format(Locale.US,
                 "All push calls: %.3f s | PSS sampling: %.3f s | session close: %.3f s\nInput items: PCM samples / feature frames / decoder tokens / characters / acoustic units.",
                 pushNanos/1e9,pssNanos/1e9,(System.nanoTime()-closeStart)/1e9);

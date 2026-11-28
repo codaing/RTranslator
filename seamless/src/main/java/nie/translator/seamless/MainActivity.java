@@ -17,6 +17,7 @@ public final class MainActivity extends Activity {
     private TextView status;
     private Button start,load,stop,benchmark,copyReport;
     private CheckBox rollover, xnnpack, nnapi, quietCpu;
+    private Spinner gpuProfile;
     private volatile LiveAudio live;
     private volatile boolean closed, busy, stopRequested;
     private volatile String lastReport;
@@ -31,6 +32,11 @@ public final class MainActivity extends Activity {
         xnnpack=new CheckBox(this);xnnpack.setText("Try XNNPACK on acoustic-unit decoder (experimental)");xnnpack.setChecked(false);panel.addView(xnnpack);
         nnapi=new CheckBox(this);nnapi.setText("Try Android NNAPI on the speech encoder (experimental)");nnapi.setChecked(false);panel.addView(nnapi);
         quietCpu=new CheckBox(this);quietCpu.setText("Quiet CPU pools (experimental: 4 threads, no idle spinning)");quietCpu.setChecked(false);panel.addView(quietCpu);
+        TextView gpuLabel=new TextView(this);gpuLabel.setText("Offline benchmark only: WebGPU profile (experimental)");panel.addView(gpuLabel);
+        gpuProfile=new Spinner(this);
+        ArrayAdapter<GpuTuning> gpuAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,GpuTuning.values());
+        gpuAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        gpuProfile.setAdapter(gpuAdapter);gpuProfile.setSelection(0);panel.addView(gpuProfile);
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
         benchmark=new Button(this);benchmark.setText("Benchmark local 16 kHz mono PCM WAV");panel.addView(benchmark);
@@ -48,7 +54,7 @@ public final class MainActivity extends Activity {
         stop.setOnClickListener(v->stopLive());
         ScrollView scroll=new ScrollView(this);scroll.addView(panel);setContentView(scroll);buttons();
     }
-    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);gpuProfile.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
     private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
     private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -86,12 +92,13 @@ public final class MainActivity extends Activity {
     }
     private void runBenchmark(Uri uri){
         final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked(),useQuiet=quietCpu.isChecked();
+        final GpuTuning gpu=(GpuTuning)gpuProfile.getSelectedItem();
         busy=true;stopRequested=false;lastReport=null;buttons();show("Reading benchmark WAV…");
         worker.execute(()->{
             try(InputStream in=getContentResolver().openInputStream(uri)){
                 if(in==null)throw new IOException("Cannot open WAV");
                 lastReport=OfflineBenchmark.run(modelDir(),in,()->stopRequested||closed,this::show,
-                    useXnnpack,useNnapi,useQuiet);
+                    useXnnpack,useNnapi,useQuiet,gpu);
                 show(lastReport);
             }catch(Exception|OutOfMemoryError e){lastReport="Benchmark stopped: "+e;show(lastReport);}
             finally{done();}
