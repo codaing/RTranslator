@@ -204,7 +204,7 @@ def export(directory, fbank_path, output_dir):
     encoded = encoder.run([encoded_name], {encoder_input: features})[0]
     del encoder
 
-    source_model = onnx.load(str(source_path.resolve()), load_external_data=False)
+    source_model = onnx.load(str(source_path.resolve()), load_external_data=True)
     candidates, initializers, producers = _candidate_nodes(source_model)
     if not candidates:
         raise RuntimeError("no compatible FP16 source-projection MatMul found")
