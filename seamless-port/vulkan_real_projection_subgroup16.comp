@@ -21,9 +21,9 @@ void main(){
     vec4 accum[ROWS_PER_SUBGROUP];
     for(uint r=0u;r<uint(ROWS_PER_SUBGROUP);r++)accum[r]=vec4(0.0);
     uint weightBase=M*K+first*(K/2u);
-    // Partition the reduction by subgroup IDs explicitly, independent of
-    // implementation-specific local-invocation-to-subgroup mapping.
-    for(uint p=subgroup*16u+lane;p<K/2u;p+=32u){
+    // Each subgroup owns different output rows, so every subgroup must
+    // independently cover the full K reduction. The 16 lanes stride by 16.
+    for(uint p=lane;p<K/2u;p+=16u){
         vec2 w0=unpackHalf2x16(data.v[weightBase+p]);
         vec2 w1=unpackHalf2x16(data.v[weightBase+K/2u+p]);
         vec2 w2=unpackHalf2x16(data.v[weightBase+K+p]);
