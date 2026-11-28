@@ -234,6 +234,70 @@ def _convert_variant(
         if fp32_error["nrms"] > 0.02:
             raise ValueError("FP32 grouped lowering differs from original FP16 core")
 
+
+        if workload_name == "m1-prefill-first" and group_size == 1024:
+            try:
+                fp32_converter = tf.lite.TFLiteConverter.from_concrete_functions(
+                    [concrete], module
+                )
+                fp32_model_blob = fp32_converter.convert()
+                fp32_interpreter = tf.lite.Interpreter(
+                    model_content=fp32_model_blob,
+                    num_threads=4,
+                    experimental_op_resolver_type=(
+                        tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES
+                    ),
+                )
+                fp32_interpreter.allocate_tensors()
+                fp32_input_detail = fp32_interpreter.get_input_details()[0]
+                fp32_output_details = fp32_interpreter.get_output_details()
+                fp32_ops = fp32_interpreter._get_ops_details()
+                if fp32_input_detail["dtype"] != np.float32:
+                    raise ValueError("FP32 reference model input is not FLOAT32")
+                if len(fp32_output_details) != 1 or fp32_output_details[0]["dtype"] != np.float32:
+                    raise ValueError("FP32 reference model must have one FLOAT32 output")
+                if any(op["op_name"] != "CONV_2D" for op in fp32_ops):
+                    raise ValueError("FP32 reference model contains a non-Conv2D op")
+                fp32_input_data = reshape(x)
+                fp32_interpreter.set_tensor(
+                    fp32_input_detail["index"], fp32_input_data
+                )
+                fp32_interpreter.invoke()
+                fp32_actual = fp32_interpreter.get_tensor(
+                    fp32_output_details[0]["index"]
+                ).reshape(rows, CHANNELS)
+                fp32_actual_metrics = metrics(y, fp32_actual)
+                fp32_actual_rows = row_error_metrics(y, fp32_actual)
+                fp32_actual_groups = group_error_metrics(y, fp32_actual, 32)
+                report.update({
+                    "fp32_tflite_model_bytes": len(fp32_model_blob),
+                    "fp32_tflite_input_shape": (
+                        fp32_input_detail["shape"].tolist()
+                    ),
+                    "fp32_tflite_output_shape": (
+                        fp32_output_details[0]["shape"].tolist()
+                    ),
+                    "fp32_tflite_ops": [op["op_name"] for op in fp32_ops],
+                    "fp32_tflite_vs_source_fp16": fp32_actual_metrics,
+                    "fp32_tflite_max_row_nrms": (
+                        fp32_actual_rows["max_row_nrms"]
+                    ),
+                    "fp32_tflite_max_fixed_32_channel_group_nrms": (
+                        fp32_actual_groups["max_group_nrms"]
+                    ),
+                })
+                (output_dir / (variant + ".fp32.tflite")).write_bytes(
+                    fp32_model_blob
+                )
+                (output_dir / (variant + ".fp32.input.bin")).write_bytes(
+                    fp32_input_data.astype("<f4").tobytes()
+                )
+                (output_dir / (variant + ".fp32.cpu-output.bin")).write_bytes(
+                    fp32_actual.astype("<f4").tobytes()
+                )
+            except Exception as fp32_error:
+                report["fp32_tflite_error"] = str(fp32_error)
+
         converter = tf.lite.TFLiteConverter.from_concrete_functions(
             [concrete], module
         )
@@ -377,7 +441,8 @@ def _convert_variant(
             [parts[index] for index in group_to_tensor], axis=1
         )
         global_error = metrics(y, actual)
-        group_error = group_error_metrics(y, actual, group_size)
+        group_error = group_error_metrics(y, actual, 32)
+        quantization_group_error = group_error_metrics(y, actual, group_size)
         row_error = row_error_metrics(y, actual)
 
         report.update({
@@ -399,10 +464,13 @@ def _convert_variant(
             "expansion_activation": expansion_report,
             "nrms": global_error["nrms"],
             "max_abs": global_error["max_abs"],
-            "output_group_nrms": group_error["group_nrms"],
-            "max_output_group_nrms": group_error["max_group_nrms"],
-            "p95_output_group_nrms": group_error["p95_group_nrms"],
-            "groups_over_5pct": group_error["groups_over_5pct"],
+            "fixed_32_channel_group_nrms": group_error["group_nrms"],
+            "max_fixed_32_channel_group_nrms": group_error["max_group_nrms"],
+            "p95_fixed_32_channel_group_nrms": group_error["p95_group_nrms"],
+            "fixed_32_channel_groups_over_5pct": group_error["groups_over_5pct"],
+            "quantization_group_nrms": quantization_group_error["group_nrms"],
+            "max_quantization_group_nrms": quantization_group_error["max_group_nrms"],
+            "p95_quantization_group_nrms": quantization_group_error["p95_group_nrms"],
             "row_nrms": row_error["row_nrms"],
             "max_row_nrms": row_error["max_row_nrms"],
             "p95_row_nrms": row_error["p95_row_nrms"],
@@ -568,6 +636,71 @@ def convert(
                 ),
             ])
 
+    # Benchmark the first row in FP32 on CPU. The tail remains INT8 and
+    # is measured separately on both XNNPACK and google-edgetpu.
+    fp32_first = next(
+        (
+            report for report in reports
+            if report["status"] == "CONVERTED"
+            and report["workload"] == "m1-prefill-first"
+            and report["group_size"] == 1024
+            and report.get("fp32_tflite_model_bytes")
+        ),
+        None,
+    )
+    if fp32_first is not None:
+        name = fp32_first["variant"]
+        shape = ",".join(map(str, fp32_first["fp32_tflite_input_shape"]))
+        common = (
+            f"--graph=/data/local/tmp/seamless-tpu/{name}.fp32.tflite "
+            f"--input_layer=activation --input_layer_shape={shape} "
+            f"--input_layer_value_files=activation:/data/local/tmp/seamless-tpu/"
+            f"{name}.fp32.input.bin --num_threads=4 --warmup_runs=10 --num_runs=100"
+        )
+        output_path = f"{app_output}/{name}-fp32-cpu-output.bin"
+        expected_bytes = int(fp32_first["rows"]) * CHANNELS * 4
+        commands.extend([
+            "",
+            f"# {name} FP32 first row / CPU XNNPACK",
+            "adb logcat -c",
+            f"adb shell rm -f {output_path}",
+            (
+                "adb shell am start -S -n "
+                "org.tensorflow.lite.benchmark/.BenchmarkModelActivity "
+                "--es args "
+                + shlex.quote(
+                    f'"{common} --use_nnapi=false --use_xnnpack=true '
+                    f'--output_filepath={output_path}"'
+                )
+            ),
+            "# Wait up to 180 seconds for the Activity to write raw output.",
+            (
+                f"for i in $(seq 1 180); do "
+                f"if adb shell test -s {output_path}; then break; fi; "
+                "sleep 1; done"
+            ),
+            (
+                "adb logcat -d -s tflite_BenchmarkModelActivity "
+                f"tflite ExecutionPlan Darwinn > {name}-fp32-cpu.log"
+            ),
+            (
+                f"adb shell test -s {output_path} || "
+                f"{{ echo 'ERROR: FP32 output missing; inspect {name}-fp32-cpu.log'; exit 1; }}"
+            ),
+            (
+                f"bytes=$(adb shell wc -c {output_path} | awk '{{print $1}}' | tr -d '\\r'); "
+                f"test $bytes = {expected_bytes} || "
+                f"{{ echo 'ERROR: expected {expected_bytes} bytes, got' $bytes; exit 1; }}"
+            ),
+            f"adb pull {output_path} {name}-fp32-cpu-output.bin",
+            (
+                "python compare_tpu_ffn_float_output.py manifest.json "
+                f"{name} {name}-fp32-cpu-output.bin "
+                f"--host-output {name}.fp32.cpu-output.bin "
+                "|| echo 'FP32 first-row precision screen failed; inspect metrics'"
+            ),
+        ])
+
     # Reassemble the split first-row + tail result and compare with
     # the single M=32 baseline for each physical backend.
     for backend in ("cpu", "tpu"):
@@ -590,6 +723,25 @@ def convert(
                     ),
                 ])
 
+    if fp32_first is not None:
+        for backend in ("cpu", "tpu"):
+            for tail_group_size in tail_group_sizes:
+                commands.extend([
+                    "",
+                    (
+                        f"# Mixed FP32 CPU first row + INT8 M=31 tail / "
+                        f"{backend} / tail group {tail_group_size}"
+                    ),
+                    (
+                        "python aggregate_tpu_ffn_split.py manifest.json "
+                        f"--backend {backend} --first-group-size 1024 "
+                        f"--tail-group-size {tail_group_size} "
+                        f"--first-fp32-output {fp32_first['variant']}-fp32-cpu-output.bin "
+                        f"--output MIXED-ACCURACY-{backend}-tail-g{tail_group_size}.json"
+                        " || echo 'Mixed precision audit failed; inspect metrics'"
+                    ),
+                ])
+
     (output_dir / "BENCHMARK-COMMANDS.txt").write_text(
         "\n".join(commands) + "\n"
     )
@@ -604,8 +756,11 @@ def convert(
         "captured M=32 calls; the tail is calibrated only from the remaining "
         "31 rows. Each manifest entry reports global, per-row and per-output-"
         "group errors, plus the actual quantized expansion intermediate. "
-        "Require full google-edgetpu delegation, exact CPU/TPU raw output "
-        "parity, and all three accuracy gates before considering any model "
+        "A separate FP32 M=1 first-row model is also emitted for CPU XNNPACK; "
+        "the mixed candidate is FP32 CPU first row plus INT8 TPU M=31 tail. "
+        "Use fixed 32-channel evaluation windows independent of quantization "
+        "group size. Require full google-edgetpu delegation, exact CPU/TPU "
+        "raw output parity, and all accuracy gates before considering any model "
         "further. Same-recording calibration/evaluation only; no held-out "
         "speech, whole-decoder or full-pipeline quality claim. Do not deploy. "
         "Meta Seamless model materials are CC BY-NC 4.0; respect the "

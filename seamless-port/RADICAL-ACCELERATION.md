@@ -107,3 +107,12 @@ The second conversion sweep tested M=1 first-row output group sizes 8, 16, 32 an
 The next sweep extends only the M=1 segment to group sizes 64, 128, 256, 512 and 1024, while retaining M=31 tail sizes 8, 16, 32 and 64. Larger groups may reduce localized relative error by combining low-energy channels, but could also worsen absolute quantization resolution; all global, per-row, and per-group metrics remain visible. The expansion activation channel statistics are now computed only over channels with non-negligible reference norm, so permanently inactive channels do not produce meaningless 1e11 relative-error maxima.
 
 The row-split models remain a host numerical experiment. Physical Pixel 9a TPU execution, exact device CPU/TPU parity, sustained latency, held-out speech and end-to-end RTF are still pending.
+
+
+## Mixed-precision first-row / INT8 tail candidate (2026-11-28)
+
+A fixed 32-channel evaluation window was introduced to prevent large quantization groups from hiding local errors. The M=1 INT8 sweep does not pass this fixed-window screen: group sizes 8, 16 and 32 have worst fixed-32-channel NRMS around 11.1–11.3%; larger quantization groups are worse and can exceed 100% in low-energy windows. The apparently passing 1024-channel quantization-group metric was therefore not accepted as proof of local accuracy.
+
+A separate NumPy reconstruction using the real captured weights and activations was then evaluated: original-quality FP32 first row plus M=31 INT8 tail with output group size 64. The combined 32-row output has global NRMS 0.706%, maximum row NRMS 4.726%, maximum fixed-32-channel group NRMS 4.231%, and p95 fixed-group NRMS 3.768%. The M1 FP32 row alone has global NRMS 0.551% and maximum fixed-32-channel group NRMS 0.779%. The M31 INT8 tail g64 has global NRMS 3.272%, maximum row NRMS 4.726%, and maximum fixed-32-channel group NRMS 4.376%.
+
+These mixed metrics are from NumPy/host-side reconstruction, not yet from an Android TFLite FP32 model or Pixel TPU execution. The next workflow exports a dedicated FP32 TFLite M1 model for XNNPACK CPU, benchmarks that first row on CPU, and benchmarks the M31 INT8 tail on both XNNPACK and google-edgetpu. It reassembles the physical outputs and applies fixed 32-channel windows independent of quantization group size. Exact CPU/TPU parity, sustained device latency, held-out speech quality, full-decoder quality and end-to-end RTF remain required before integration.

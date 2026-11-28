@@ -121,7 +121,8 @@ def main():
     device = reconstruct(args.device_output, meta)
     device_global = nrms(reference, device)
     device_rows = row_error_metrics(reference, device)
-    device_groups = group_error_metrics(
+    device_groups = group_error_metrics(reference, device, 32)
+    device_quant_groups = group_error_metrics(
         reference, device, int(meta["group_size"])
     )
     result = {
@@ -133,6 +134,7 @@ def main():
         "device_vs_fp32_max_abs": float(np.max(np.abs(device - reference))),
         "device_vs_fp32_rows": device_rows,
         "device_vs_fp32_groups": device_groups,
+        "device_vs_fp32_quantization_groups": device_quant_groups,
     }
     result["device_vs_fp32_rows"]["worst_source_row_index"] = (
         result["source_row_offset"] + device_rows["worst_row_index"]
@@ -146,7 +148,10 @@ def main():
     result["precision_screen"] = {
         "global_pass": device_global < args.global_threshold,
         "row_pass": device_rows["max_row_nrms"] < args.row_threshold,
-        "group_pass": device_groups["max_group_nrms"] < args.group_threshold,
+        "fixed_32_channel_group_pass": (
+            device_groups["max_group_nrms"] < args.group_threshold
+        ),
+        "quantization_group_max_nrms": device_quant_groups["max_group_nrms"],
         "pass": bool(precision_pass),
         "thresholds": {
             "global_nrms": args.global_threshold,
@@ -164,7 +169,8 @@ def main():
     if host_path.exists():
         host = reconstruct(host_path, meta)
         host_rows = row_error_metrics(reference, host)
-        host_groups = group_error_metrics(
+        host_groups = group_error_metrics(reference, host, 32)
+        host_quant_groups = group_error_metrics(
             reference, host, int(meta["group_size"])
         )
         device_raw = Path(args.device_output).read_bytes()
@@ -176,6 +182,7 @@ def main():
             "host_cpu_vs_fp32_nrms": nrms(reference, host),
             "host_cpu_vs_fp32_rows": host_rows,
             "host_cpu_vs_fp32_groups": host_groups,
+            "host_cpu_vs_fp32_quantization_groups": host_quant_groups,
             "device_vs_host_cpu_nrms": nrms(host, device),
             "device_vs_host_cpu_max_abs": float(np.max(np.abs(device - host))),
             "device_vs_host_cpu_exact_bytes": exact,

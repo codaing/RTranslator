@@ -1,9 +1,13 @@
+import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
+from aggregate_tpu_ffn_split import main as aggregate_split_main
 from compare_tpu_ffn_outputs import (
     group_error_metrics,
     reconstruct,
@@ -46,6 +50,60 @@ class GroupedFfnAuditTest(unittest.TestCase):
         self.assertEqual(result["worst_group_channels"], [8, 16])
         self.assertEqual(result["groups_over_5pct"], 1)
         self.assertGreater(result["max_group_nrms"], 0.09)
+
+
+    def test_mixed_fp32_first_row_uses_fixed_32_channel_evaluation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def make_meta(variant, workload, rows, group_size):
+                groups = 1024 // group_size
+                return {
+                    "variant": variant,
+                    "workload": workload,
+                    "status": "CONVERTED",
+                    "rows": rows,
+                    "group_size": group_size,
+                    "output_groups": groups,
+                    "output_group_to_tensor_index": list(range(groups)),
+                    "output_quantizations": [[1.0, 0] for _ in range(groups)],
+                }
+
+            full = make_meta("full", "m32-full", 32, 32)
+            first = make_meta("first", "m1-prefill-first", 1, 1024)
+            tail = make_meta("tail", "m31-prefill-tail", 31, 64)
+            manifest = [full, first, tail]
+            (root / "manifest.json").write_text(json.dumps(manifest))
+
+            for item in manifest:
+                (root / (item["variant"] + ".source-reference.bin")).write_bytes(
+                    np.zeros((item["rows"], 1024), dtype="<f4").tobytes()
+                )
+                (root / (item["variant"] + "-cpu-output.bin")).write_bytes(
+                    np.zeros(item["rows"] * 1024, dtype=np.int8).tobytes()
+                )
+
+            first_fp32 = root / "first-fp32-output.bin"
+            first_fp32.write_bytes(np.zeros(1024, dtype="<f4").tobytes())
+            output_json = root / "mixed-result.json"
+            argv = [
+                "aggregate_tpu_ffn_split.py",
+                str(root / "manifest.json"),
+                "--backend", "cpu",
+                "--first-group-size", "1024",
+                "--tail-group-size", "64",
+                "--first-fp32-output", str(first_fp32),
+                "--output", str(output_json),
+            ]
+            with patch.object(sys, "argv", argv):
+                aggregate_split_main()
+
+            result = json.loads(output_json.read_text())
+            self.assertEqual(result["first_mode"], "fp32_cpu")
+            self.assertTrue(result["precision_screen"]["pass"])
+            self.assertEqual(
+                result["fixed_evaluation_group_size"], 32
+            )
 
     def test_reconstruct_uses_manifest_tensor_order_and_scales(self):
         raw = np.array(
