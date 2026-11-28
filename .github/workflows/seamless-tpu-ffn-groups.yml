@@ -1,0 +1,41 @@
+name: Pixel TPU grouped-output decoder FFN quantization
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-tpu-ffn-groups.yml'
+      - 'seamless-port/convert_tpu_ffn_grouped.py'
+      - 'seamless-port/convert_tpu_bank.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: tpu-ffn-groups-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  convert:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: tpu-real-ffn-capture
+          path: tpu-capture
+          run-id: '46126098483'
+          github-token: ${{ github.token }}
+      - name: Install TensorFlow converter
+        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
+      - name: Convert grouped-output FFN models
+        run: |
+          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_ffn_grouped.py tpu-capture tpu-benchmark
+          cp tpu-capture/MODEL-LICENSE.txt tpu-benchmark/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-real-FFN-grouped-output-TPU-benchmark
+          path: tpu-benchmark/
+          retention-days: 7
