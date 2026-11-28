@@ -2,7 +2,7 @@
 #ifndef OUTS
 #define OUTS 4
 #endif
-// One 32-lane subgroup computes OUTS independent output channels.
+// One 32-invocation workgroup computes OUTS independent output channels.
 // Each lane loads the activation pair once and reuses it across OUTS weights.
 // Weights are output-major packed FP16; accumulation remains FP32.
 layout(local_size_x=32,local_size_y=1,local_size_z=1) in;

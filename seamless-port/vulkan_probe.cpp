@@ -88,7 +88,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         const bool subgroupArithmetic=(subgroupProps.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT)&&
             (subgroupProps.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
         out<<"Vulkan subgroup size: "<<subgroupProps.subgroupSize
-           <<" | compute arithmetic: "<<(subgroupArithmetic?"yes":"no")<<"\\n";
+           <<" | compute arithmetic: "<<(subgroupArithmetic?"yes":"no")<<"\n";
         out<<"Vulkan device: "<<prop.deviceName<<" | type="<<prop.deviceType<<" | vendor=0x"<<std::hex<<prop.vendorID<<std::dec<<" | driver="<<prop.driverVersion<<" | API "<<VK_VERSION_MAJOR(prop.apiVersion)<<"."<<VK_VERSION_MINOR(prop.apiVersion)<<"."<<VK_VERSION_PATCH(prop.apiVersion)<<"\n";
         float priority=1.f;VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qi.queueFamilyIndex=family;qi.queueCount=1;qi.pQueuePriorities=&priority;
         VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
@@ -254,12 +254,15 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
                 float f;std::memcpy(&f,words+aCount+bCount+i,4);
                 if(!std::isfinite(f))throw std::runtime_error("unwritten or nonfinite matrix output");
             }
-            for(uint32_t j=0;j<64;j++){
-                uint32_t m=j%uint32_t(rows), n=(j*127u+j*j*11u)%N;
-                float expected=0;
-                for(uint32_t k=0;k<K;k++)expected+=av(m,k)*weights[wi(k,n)];
+            // The synthetic weight pattern depends only on k%4 and n%4.
+            // Compute four reference dot products per row, then compare every
+            // output. This remains outside the timed submissions.
+            float expected[32][4]{};
+            for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t residue=0;residue<4;residue++)
+                for(uint32_t k=0;k<K;k++)expected[m][residue]+=av(m,k)*weights[wi(k,residue)];
+            for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t n=0;n<N;n++){
                 float got;std::memcpy(&got,words+aCount+bCount+m*N+n,4);
-                if(std::abs(got-expected)>1e-4f)throw std::runtime_error("matrix readback mismatch");
+                if(std::abs(got-expected[m][n&3u])>1e-4f)throw std::runtime_error("matrix readback mismatch");
             }
         }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
         std::sort(wallUs.begin(),wallUs.end());
