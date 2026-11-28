@@ -1,4 +1,4 @@
-name: Build minimal Seamless port and runtime test
+name: Build Seamless WAV RTF benchmark app
 on:
   push:
     branches: [seamless-streaming]
@@ -87,8 +87,8 @@ jobs:
           name: seamless-test-reports
           path: install-diagnostics/
           if-no-files-found: warn
-      - name: Upload clearly labeled test APK
+      - name: Upload standalone WAV benchmark APK
         uses: actions/upload-artifact@v4
         with:
-          name: Seamless-streaming-integration-UNVALIDATED
+          name: Seamless-WAV-RTF-Benchmark
           path: seamless/build/outputs/apk/release/seamless-release.apk
