@@ -65,3 +65,4 @@ jobs:
           path: reports/
           if-no-files-found: warn
           retention-days: 7
+# Retry CI          
