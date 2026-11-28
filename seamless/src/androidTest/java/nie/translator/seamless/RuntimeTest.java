@@ -25,13 +25,19 @@ public class RuntimeTest {
         String report=VulkanProbe.realProjection(target);
         for(String line:report.split("\\n"))android.util.Log.i("RealProjectionProbe",line);
         assertFalse("Vulkan comparison failed: "+report,report.contains("FAIL"));
-        for(String variant:new String[]{"fused-4","multirow-2","multirow-4","multirow-8"}){
+        boolean subgroup16=report.contains("Vulkan subgroup size: 16 | compute arithmetic: yes");
+        String[] variants=subgroup16
+                ?new String[]{"multirow-4","subgroup16-rows2","subgroup16-rows4","subgroup16-rows8"}
+                :new String[]{"multirow-4"};
+        for(String variant:variants){
             String prefix="Vulkan real-model "+variant+" projection ";
             boolean passed=false;
             for(String line:report.split("\\n"))
                 if(line.startsWith(prefix)&&line.contains(": PASS")&&line.contains("outputs checked"))passed=true;
             assertTrue("Missing actual model parity for "+variant+": "+report,passed);
         }
+        if(!subgroup16)assertTrue("Unsupported subgroup-16 path must be reported as skipped: "+report,
+                report.contains("Subgroup16 real-model variants: SKIP"));
     }
 
     @Test public void vocoderInterfaceExecutesOnAndroid() throws Exception {

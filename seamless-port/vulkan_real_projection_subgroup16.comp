@@ -1,0 +1,50 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#ifndef ROWS_PER_SUBGROUP
+#define ROWS_PER_SUBGROUP 1
+#endif
+// A 32-lane workgroup contains two 16-lane subgroups on the target Mali GPU.
+// Each subgroup independently computes a row tile, so subgroupAdd replaces
+// the shared-memory reduction without cross-subgroup barriers. FP32 accumulates.
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(push_constant) uniform Params { uint K; uint N; uint M; } params;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+void main(){
+    uint K=params.K, N=params.N, M=params.M;
+    uint subgroup=gl_SubgroupID;
+    uint lane=gl_SubgroupInvocationID;
+    uint firstRow=gl_WorkGroupID.y*(2u*uint(ROWS_PER_SUBGROUP))
+                 +subgroup*uint(ROWS_PER_SUBGROUP);
+    uint first=gl_WorkGroupID.x*4u;
+    if(firstRow>=M || first+3u>=N)return;
+    vec4 accum[ROWS_PER_SUBGROUP];
+    for(uint r=0u;r<uint(ROWS_PER_SUBGROUP);r++)accum[r]=vec4(0.0);
+    uint weightBase=M*K+first*(K/2u);
+    // Local x spans both subgroups: p=0..15 belongs to subgroup 0,
+    // p=16..31 belongs to subgroup 1, with a 32-pair stride thereafter.
+    for(uint p=gl_LocalInvocationID.x;p<K/2u;p+=32u){
+        vec2 w0=unpackHalf2x16(data.v[weightBase+p]);
+        vec2 w1=unpackHalf2x16(data.v[weightBase+K/2u+p]);
+        vec2 w2=unpackHalf2x16(data.v[weightBase+K+p]);
+        vec2 w3=unpackHalf2x16(data.v[weightBase+3u*(K/2u)+p]);
+        for(uint r=0u;r<uint(ROWS_PER_SUBGROUP);r++){
+            uint row=firstRow+r;
+            if(row<M){
+                uint base=row*K+2u*p;
+                vec2 a=vec2(uintBitsToFloat(data.v[base]),uintBitsToFloat(data.v[base+1u]));
+                accum[r]+=vec4(dot(a,w0),dot(a,w1),dot(a,w2),dot(a,w3));
+            }
+        }
+    }
+    for(uint r=0u;r<uint(ROWS_PER_SUBGROUP);r++){
+        vec4 sum=subgroupAdd(accum[r]);
+        if(lane==0u){
+            uint row=firstRow+r;
+            if(row<M){
+                uint base=M*K+K*N/2u+row*N+first;
+                for(uint o=0u;o<4u;o++)data.v[base+o]=floatBitsToUint(sum[o]);
+            }
+        }
+    }
+}

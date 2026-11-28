@@ -18,11 +18,13 @@ done
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_real_projection.comp -o "$TMP/real_projection.spv"
 for rows in 2 4 8; do
   "$GLSLC" --target-env=vulkan1.0 -O -DROWS=$rows seamless-port/vulkan_real_projection_multirow.comp -o "$TMP/real_projection_rows$rows.spv"
+  rows_per_subgroup=$((rows / 2))
+  "$GLSLC" --target-env=vulkan1.1 -O -DROWS_PER_SUBGROUP=$rows_per_subgroup seamless-port/vulkan_real_projection_subgroup16.comp -o "$TMP/real_projection_subgroup16_rows$rows.spv"
 done
 python - "$TMP" <<'PY'
 import pathlib,struct,sys
 d=pathlib.Path(sys.argv[1])
-for name in ("probe","matmul","gemv","gemv_subgroup16","gemv_subgroup32","gemv_fused4","gemv_fused8","gemv_fused16","real_projection","real_projection_rows2","real_projection_rows4","real_projection_rows8"):
+for name in ("probe","matmul","gemv","gemv_subgroup16","gemv_subgroup32","gemv_fused4","gemv_fused8","gemv_fused16","real_projection","real_projection_rows2","real_projection_rows4","real_projection_rows8","real_projection_subgroup16_rows2","real_projection_subgroup16_rows4","real_projection_subgroup16_rows8"):
     data=(d/(name+".spv")).read_bytes()
     words=struct.unpack("<"+"I"*(len(data)//4),data)
     assert words[0]==0x07230203

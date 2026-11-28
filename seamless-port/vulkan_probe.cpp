@@ -19,6 +19,9 @@
 #include "real_projection_rows2_shader.h"
 #include "real_projection_rows4_shader.h"
 #include "real_projection_rows8_shader.h"
+#include "real_projection_subgroup16_rows2_shader.h"
+#include "real_projection_subgroup16_rows4_shader.h"
+#include "real_projection_subgroup16_rows8_shader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -230,17 +233,22 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
             // One device, descriptor set and packed weight buffer for all variants.
             // Rotate the order each round to reduce thermal/clock ordering bias.
             struct Variant {
-                uint32_t tile; const uint32_t* code; size_t bytes;
+                const char* label; uint32_t tile; const uint32_t* code; size_t bytes;
                 VkCommandBuffer cmd=VK_NULL_HANDLE;
                 double setupMs=0, maxAbs=0, nrms=0;
                 std::vector<double> wallUs,gpuUs;
             };
-            Variant variants[]={
-                {1,real_projection_shader,sizeof(real_projection_shader)},
-                {2,real_projection_rows2_shader,sizeof(real_projection_rows2_shader)},
-                {4,real_projection_rows4_shader,sizeof(real_projection_rows4_shader)},
-                {8,real_projection_rows8_shader,sizeof(real_projection_rows8_shader)}
-            };
+            std::vector<Variant> variants;
+            // Keep the fastest measured shared-memory kernel as the control.
+            variants.push_back({"multirow-4",4,real_projection_rows4_shader,sizeof(real_projection_rows4_shader)});
+            const bool subgroup16Supported=subgroupProps.subgroupSize==16&&subgroupArithmetic;
+            if(subgroup16Supported){
+                variants.push_back({"subgroup16-rows2",2,real_projection_subgroup16_rows2_shader,sizeof(real_projection_subgroup16_rows2_shader)});
+                variants.push_back({"subgroup16-rows4",4,real_projection_subgroup16_rows4_shader,sizeof(real_projection_subgroup16_rows4_shader)});
+                variants.push_back({"subgroup16-rows8",8,real_projection_subgroup16_rows8_shader,sizeof(real_projection_subgroup16_rows8_shader)});
+            }else{
+                out<<"Subgroup16 real-model variants: SKIP | device requires subgroup size 16 and compute arithmetic\n";
+            }
             VkCommandPoolCreateInfo cpi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cpi.queueFamilyIndex=family;
             check(vkCreateCommandPool(r.device,&cpi,nullptr,&r.commands),"comparison command pool");
             VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -310,20 +318,22 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
                 v.maxAbs=0;
                 for(uint32_t i=0;i<cCount;i++){
                     float got;std::memcpy(&got,words+aCount+bCount+i,4);
-                    if(!std::isfinite(got))throw std::runtime_error("tile "+std::to_string(v.tile)+" unwritten/nonfinite output "+std::to_string(i));
+                    if(!std::isfinite(got))throw std::runtime_error(std::string(v.label)+" unwritten/nonfinite output "+std::to_string(i));
                     double diff=double(got)-cpuExpected[i];
                     sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
                     v.maxAbs=std::max(v.maxAbs,std::abs(diff));
                 }
                 v.nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
                 if(v.nrms>0.002||v.maxAbs>0.01)
-                    throw std::runtime_error("tile "+std::to_string(v.tile)+" CPU ORT parity failed: NRMS="+std::to_string(v.nrms)+" max_abs="+std::to_string(v.maxAbs));
+                    throw std::runtime_error(std::string(v.label)+" CPU ORT parity failed: NRMS="+std::to_string(v.nrms)+" max_abs="+std::to_string(v.maxAbs));
             };
             for(auto& v:variants)validate(v);
-            // Complete all warmups before measurement. 32 warmups and 12 samples
-            // per variant; 12 is divisible by four for balanced slot ordering.
+            // Complete all warmups before measurement. Rotate each variant through
+            // every slot; the 4-kernel Pixel path gets 32 warmups and 12 samples.
+            const int variantCount=int(variants.size());
             for(int round=0;round<44;round++)
-                for(int slot=0;slot<4;slot++)submitVariant(variants[(round+slot)%4],round>=32);
+                for(int slot=0;slot<variantCount;slot++)
+                    submitVariant(variants[(round+slot)%variantCount],round>=32);
             for(auto& v:variants)validate(v);
             out<<"Shared Vulkan setup "<<commonSetupMs<<" ms | activation copy "<<fixtureCopyMs
                <<" ms | FP16 weight pack+mapped write "<<weightPackMs<<" ms (included in shared setup)\n";
@@ -333,7 +343,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
                 auto median=[](const std::vector<double>& a){return (a[(a.size()-1)/2]+a[a.size()/2])*0.5;};
                 double wall=median(v.wallUs);
                 double gpu=v.gpuUs.empty()?0:median(v.gpuUs);
-                out<<"Vulkan real-model "<<(v.tile==1?"fused-4":"multirow-"+std::to_string(v.tile))
+                out<<"Vulkan real-model "<<v.label
                    <<" projection "<<rows<<"x"<<K<<"x"<<N<<": PASS | FP16 weights / FP32 accumulation"
                    <<" | CPU ONNX Runtime FP32 reference: all "<<cCount<<" outputs checked"
                    <<" | max_abs "<<v.maxAbs<<" | NRMS "<<v.nrms

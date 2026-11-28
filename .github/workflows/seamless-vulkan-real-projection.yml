@@ -7,6 +7,8 @@ on:
       - 'seamless-port/export_vulkan_projection_fixture.py'
       - 'seamless-port/test_export_vulkan_projection_fixture.py'
       - 'seamless-port/vulkan_real_projection.comp'
+      - 'seamless-port/vulkan_real_projection_multirow.comp'
+      - 'seamless-port/vulkan_real_projection_subgroup16.comp'
       - 'seamless-port/vulkan_probe.cpp'
       - 'seamless-port/build_vulkan_probe.sh'
       - 'seamless/src/main/java/nie/translator/seamless/VulkanProbe.java'
