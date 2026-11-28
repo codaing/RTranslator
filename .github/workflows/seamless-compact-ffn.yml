@@ -7,6 +7,9 @@ on:
       - 'seamless-port/convert_compact_ffn.py'
       - 'seamless-port/audit_compact_ffn.py'
       - 'seamless-port/benchmark_compact_ffn.sh'
+      - 'seamless-port/benchmark_compact_ffn_repeat.sh'
+      - 'seamless-port/summarize_compact_ffn_repeat.py'
+      - 'seamless-port/test_compact_ffn_repeat.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -32,7 +35,12 @@ jobs:
         run: |
           TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_compact_ffn.py tpu-capture compact-benchmark
           cp seamless-port/audit_compact_ffn.py seamless-port/benchmark_compact_ffn.sh compact-benchmark/
+          cp seamless-port/benchmark_compact_ffn_repeat.sh seamless-port/summarize_compact_ffn_repeat.py compact-benchmark/
+          cp seamless-port/test_compact_ffn_repeat.py compact-benchmark/
           bash -n compact-benchmark/benchmark_compact_ffn.sh
+          bash -n compact-benchmark/benchmark_compact_ffn_repeat.sh
+          cd compact-benchmark
+          python -m unittest -v test_compact_ffn_repeat.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
