@@ -11,6 +11,15 @@ import java.io.InputStream;
 
 @RunWith(AndroidJUnit4.class)
 public class RuntimeTest {
+    @Test public void realModelVulkanProjectionMatchesCpuReference() throws Exception {
+        // Actual model weights and speech-derived activation are embedded in the target APK.
+        android.content.Context target=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        String report=VulkanProbe.realProjection(target);
+        android.util.Log.i("RealProjectionProbe",report.replace('\n',' '));
+        assertTrue("Actual model Vulkan projection must match CPU ONNX Runtime: "+report,
+                report.contains("Vulkan real-model fused-4 projection") && report.contains(": PASS"));
+    }
+
     @Test public void vocoderInterfaceExecutesOnAndroid() throws Exception {
         // A small deterministic graph tests the real Java/ORT interface, not speech quality.
         android.content.Context context = InstrumentationRegistry.getInstrumentation().getContext();
