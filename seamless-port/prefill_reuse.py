@@ -14,3 +14,13 @@ def retain_state(caches,features,cut):
     if any(c.ndim!=4 or c.shape[0]!=1 or c.shape[2]!=length for c in caches):
         raise ValueError("saved cache does not align with accepted features")
     return [np.ascontiguousarray(c[:,:,:cut,:]) for c in caches],list(features[:cut])
+
+def refresh_chunks(tokens,cut):
+    """Exported graph accepts empty-cache prefill or one token with past."""
+    if cut<0 or cut>=len(tokens):
+        raise ValueError("invalid prefix cut")
+    if not cut:
+        yield 0,tokens
+    else:
+        for i in range(cut,len(tokens)):
+            yield i,tokens[i:i+1]

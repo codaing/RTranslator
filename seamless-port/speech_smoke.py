@@ -59,7 +59,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0,unit_duration_gate=False,prefill_tail=0):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0,unit_duration_gate=False,prefill_tail=0,prefill_refresh=0):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -133,7 +133,9 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
         raise ValueError("unsupported prefill reuse experiment")
     if prefill_tail and not incremental:
         raise ValueError("prefill reuse requires incremental decoder")
-    from prefill_reuse import retained_prefix, retain_state
+    if prefill_refresh<0 or (prefill_refresh and not prefill_tail):
+        raise ValueError('periodic refresh requires approximate reuse')
+    from prefill_reuse import retained_prefix, retain_state, refresh_chunks
     saved_caches=None
     saved_features=None
     saved_tokens=None
@@ -144,7 +146,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
     previous_count=0
     encoder_frames=0
     end=len(features)&~1
-    for count in list(range(192,end,update_frames))+[end]:
+    for update_index,count in enumerate(list(range(192,end,update_frames))+[end]):
         t0=time.monotonic();finished=count==end
         phase_start=time.monotonic()
         # Measured stride = 16 raw frames per encoder state. For irregular
@@ -177,17 +179,19 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
             # Experimental approximation: upper decoder layers depend on
             # older encoder outputs. Never represent this as exact reuse.
             # Rebuild at EOF and always recompute at least the last tail tokens.
-            cut=retained_prefix(tokens,saved_tokens,prefill_tail,finished)
+            refresh=finished or bool(prefill_refresh and update_index%prefill_refresh==0)
+            cut=retained_prefix(tokens,saved_tokens,prefill_tail,refresh)
             if cut:
                 state.caches,feature_rows=retain_state(saved_caches,saved_features,cut)
                 reused_prefill_tokens+=cut
             else:
                 feature_rows=[]
             prefill_tokens+=len(tokens)-cut
-            tok,p,initial_features=incremental_predict(state,tokens[cut:],cut)
+            for position,chunk in refresh_chunks(tokens,cut):
+                tok,p,initial_features=incremental_predict(state,chunk,position)
+                feature_rows.extend(initial_features[0])
             decisions.append({"source_frames":count,"prefix_tokens":len(tokens),"token":tok,"p_choose":p,
                 "encoded_sha256":hashlib.sha256(encoded.tobytes()).hexdigest(),"encoded_rms":float(np.sqrt(np.mean(encoded**2)))})
-            feature_rows.extend(initial_features[0])
             for _ in range(50):
                 if tok==meta["eos"] or (not finished and p<0.5):break
                 if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
@@ -274,7 +278,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "encoder_window":encoder_window,"encoder_input_frames":encoder_frames,
        "unit_duration_gate":unit_duration_gate,"unit_calls":unit_calls,
-       "prefill_tail":prefill_tail,"prefill_tokens":prefill_tokens,"reused_prefill_tokens":reused_prefill_tokens,
+       "prefill_tail":prefill_tail,"prefill_refresh":prefill_refresh,"prefill_tokens":prefill_tokens,"reused_prefill_tokens":reused_prefill_tokens,
        "duration_gate_calls":duration_gate_calls,"unit_calls_skipped":unit_calls_skipped,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
@@ -292,4 +296,5 @@ if __name__=="__main__":
     p.add_argument("--encoder-window",type=int,default=0,choices=(0,384,768,1152))
     p.add_argument("--unit-duration-gate",action="store_true")
     p.add_argument("--prefill-tail",type=int,choices=(0,1,4,8),default=0)
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window,a.unit_duration_gate,a.prefill_tail)
+    p.add_argument('--prefill-refresh',type=int,default=0)
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window,a.unit_duration_gate,a.prefill_tail,a.prefill_refresh)

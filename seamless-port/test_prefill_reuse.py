@@ -1,6 +1,6 @@
 import unittest
 import numpy as np
-from prefill_reuse import retained_prefix,retain_state
+from prefill_reuse import retained_prefix,retain_state,refresh_chunks
 
 class PrefillReuseTest(unittest.TestCase):
     def test_prefix_selection(self):
@@ -18,3 +18,10 @@ class PrefillReuseTest(unittest.TestCase):
         np.testing.assert_array_equal(retained[0],cache[:,:,:3,:])
         self.assertTrue(retained[0].flags.c_contiguous)
         with self.assertRaises(ValueError):retain_state([cache],features[:-1],3)
+
+    def test_only_supported_decoder_shapes(self):
+        ids=[2,7,8,9,10,11]
+        self.assertEqual(list(refresh_chunks(ids,0)),[(0,ids)])
+        self.assertEqual(list(refresh_chunks(ids,2)),[(2,[8]),(3,[9]),(4,[10]),(5,[11])])
+        self.assertEqual(list(refresh_chunks(ids,5)),[(5,[11])])
+        with self.assertRaises(ValueError):list(refresh_chunks(ids,6))
