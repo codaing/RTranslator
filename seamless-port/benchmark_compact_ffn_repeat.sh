@@ -75,6 +75,11 @@ for ((round=1; round<=ROUNDS; round++)); do
         fi
         sleep 2
         adb logcat -d -v threadtime -T "$since" -s tflite_BenchmarkModelActivity tflite ExecutionPlan Darwinn > "$log"
+        {
+            echo "POST-RUN DEVICE SNAPSHOT"
+            adb shell -T dumpsys battery
+            adb shell -T dumpsys thermalservice 2>&1 || true
+        } >> "$device"
         adb exec-out run-as "$PKG" cat "$REL/$out" > "$out.part"
         [[ $(wc -c < "$out.part" | tr -d '[:space:]') == 4096 ]] || { echo "Pulled output size mismatch: $out" >&2; exit 1; }
         mv "$out.part" "$out"

@@ -71,7 +71,11 @@ def main():
             "round": round_number, "width": width, "timing": timing,
             "source_nrms": source_error, "max_fixed32_group_nrms": max(groups),
             "host_device_nrms": host_error,
-            "accuracy_pass": source_error < 0.05 and max(groups) < 0.05,
+            "host_device_pass": host_error < 1e-5,
+            "accuracy_pass": (
+                source_error < 0.05 and max(groups) < 0.05
+                and host_error < 1e-5
+            ),
             "output_file": output_path.name,
         }
         if not result["accuracy_pass"]:
