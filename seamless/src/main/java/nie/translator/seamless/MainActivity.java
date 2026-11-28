@@ -103,6 +103,7 @@ public final class MainActivity extends Activity {
                 report.append("\n").append(VulkanProbe.run());
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(1));
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(32));
+                if(!stopRequested)report.append("\n").append(VulkanProbe.subgroup());
                 for(int d:new int[]{1,4,8,16,32})if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(d));
                 for(int o:new int[]{4,8,16})if(!stopRequested)report.append("\n").append(VulkanProbe.fused(o));
                 report.append("\nWebGPU retry deferred: repeated Pixel readback timeout.");

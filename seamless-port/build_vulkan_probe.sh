@@ -9,13 +9,16 @@ trap 'rm -rf "$TMP"' EXIT
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe.comp -o "$TMP/probe.spv"
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe_matmul.comp -o "$TMP/matmul.spv"
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe_gemv.comp -o "$TMP/gemv.spv"
+for subgroup in 16 32; do
+  "$GLSLC" --target-env=vulkan1.1 -O -DSG_SIZE=$subgroup seamless-port/vulkan_probe_subgroup.comp -o "$TMP/gemv_subgroup$subgroup.spv"
+done
 for outputs in 4 8 16; do
   "$GLSLC" --target-env=vulkan1.0 -O -DOUTS=$outputs seamless-port/vulkan_probe_fused.comp -o "$TMP/gemv_fused$outputs.spv"
 done
 python - "$TMP" <<'PY'
 import pathlib,struct,sys
 d=pathlib.Path(sys.argv[1])
-for name in ("probe","matmul","gemv","gemv_fused4","gemv_fused8","gemv_fused16"):
+for name in ("probe","matmul","gemv","gemv_subgroup16","gemv_subgroup32","gemv_fused4","gemv_fused8","gemv_fused16"):
     data=(d/(name+".spv")).read_bytes()
     words=struct.unpack("<"+"I"*(len(data)//4),data)
     assert words[0]==0x07230203

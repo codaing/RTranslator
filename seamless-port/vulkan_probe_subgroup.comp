@@ -1,0 +1,26 @@
+#version 450
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
+#ifndef SG_SIZE
+#define SG_SIZE 16
+#endif
+// One subgroup computes one output channel; four subgroups per workgroup.
+// Each lane accumulates a strided slice of the reduction and subgroupAdd
+// replaces the shared-memory tree and its workgroup barriers.
+layout(local_size_x=SG_SIZE,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+void main(){
+    const uint K=1024u,N=8192u;
+    uint lane=gl_SubgroupInvocationID;
+    uint n=gl_WorkGroupID.x*4u+gl_LocalInvocationID.y;
+    uint b0=K+n*(K/2u);
+    float accum=0.0;
+    for(uint p=lane;p<K/2u;p+=SG_SIZE){
+        vec2 w=unpackHalf2x16(data.v[b0+p]);
+        vec2 a=vec2(uintBitsToFloat(data.v[2u*p]),uintBitsToFloat(data.v[2u*p+1u]));
+        accum+=dot(a,w);
+    }
+    float sum=subgroupAdd(accum);
+    if(gl_SubgroupInvocationID==0u)
+        data.v[K+K*N/2u+n]=floatBitsToUint(sum);
+}

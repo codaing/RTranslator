@@ -10,6 +10,8 @@
 #include "probe_shader.h"
 #include "matmul_shader.h"
 #include "gemv_shader.h"
+#include "gemv_subgroup16_shader.h"
+#include "gemv_subgroup32_shader.h"
 #include "gemv_fused4_shader.h"
 #include "gemv_fused8_shader.h"
 #include "gemv_fused16_shader.h"
@@ -80,6 +82,13 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         }
         if(!physical)throw std::runtime_error("no compute queue");
         VkPhysicalDeviceProperties prop{};vkGetPhysicalDeviceProperties(physical,&prop);
+        VkPhysicalDeviceSubgroupProperties subgroupProps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
+        VkPhysicalDeviceProperties2 props2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};props2.pNext=&subgroupProps;
+        vkGetPhysicalDeviceProperties2(physical,&props2);
+        const bool subgroupArithmetic=(subgroupProps.supportedStages&VK_SHADER_STAGE_COMPUTE_BIT)&&
+            (subgroupProps.supportedOperations&VK_SUBGROUP_FEATURE_ARITHMETIC_BIT);
+        out<<"Vulkan subgroup size: "<<subgroupProps.subgroupSize
+           <<" | compute arithmetic: "<<(subgroupArithmetic?"yes":"no")<<"\\n";
         out<<"Vulkan device: "<<prop.deviceName<<" | type="<<prop.deviceType<<" | vendor=0x"<<std::hex<<prop.vendorID<<std::dec<<" | driver="<<prop.driverVersion<<" | API "<<VK_VERSION_MAJOR(prop.apiVersion)<<"."<<VK_VERSION_MINOR(prop.apiVersion)<<"."<<VK_VERSION_PATCH(prop.apiVersion)<<"\n";
         float priority=1.f;VkDeviceQueueCreateInfo qi{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};qi.queueFamilyIndex=family;qi.queueCount=1;qi.pQueuePriorities=&priority;
         VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
@@ -93,12 +102,13 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         // Positive modes are tiled GEMM; negative -1..-32 are repeated
         // baseline GEMV dispatches; -104/-108/-116 are fused 4/8/16-output kernels.
         const bool gemv=mode<0;
-        const bool fused=mode<=-104;
-        const int dispatches=fused?1:(gemv?-mode:1);
+        const bool subgroup=mode==-201;
+        const bool fused=mode==-104||mode==-108||mode==-116;
+        const int dispatches=fused||subgroup?1:(gemv?-mode:1);
         const uint32_t outputsPerGroup=fused?uint32_t(-mode-100):4u;
         const int rows=gemv?1:mode;
         const bool validMode=mode==0||mode==1||mode==32||mode==-1||mode==-4||mode==-8||
-            mode==-16||mode==-32||mode==-104||mode==-108||mode==-116;
+            mode==-16||mode==-32||mode==-104||mode==-108||mode==-116||subgroup;
         if(!validMode)throw std::runtime_error("unsupported probe mode");
         constexpr uint32_t K=1024,N=8192;
         const uint32_t aCount=uint32_t(rows)*K;
@@ -106,7 +116,11 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         const uint32_t cCount=uint32_t(rows)*N;
         const VkDeviceSize bytes=rows?VkDeviceSize(aCount+bCount+cCount)*4:16*sizeof(float);
         if(bytes>prop.limits.maxStorageBufferRange)throw std::runtime_error("storage buffer limit");
-        if(rows&&!fused&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
+        if(rows&&!fused&&!subgroup&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
+        if(subgroup&&(!subgroupArithmetic||(subgroupProps.subgroupSize!=16&&subgroupProps.subgroupSize!=32)||
+            prop.limits.maxComputeWorkGroupInvocations<subgroupProps.subgroupSize*4||
+            prop.limits.maxComputeWorkGroupSize[0]<subgroupProps.subgroupSize||prop.limits.maxComputeWorkGroupSize[1]<4))
+            throw std::runtime_error("subgroup arithmetic/size 16 or 32 unsupported");
         if(fused&&(prop.limits.maxComputeWorkGroupInvocations<32||prop.limits.maxComputeWorkGroupSize[0]<32))throw std::runtime_error("fused workgroup limit");
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         check(vkCreateBuffer(r.device,&bi,nullptr,&r.buffer),"vkCreateBuffer");
@@ -153,11 +167,14 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         vkUpdateDescriptorSets(r.device,1,&w,0,nullptr);
         VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,4};
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pli.setLayoutCount=1;pli.pSetLayouts=&r.setLayout;
-        if(rows&&!fused){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
+        if(rows&&!fused&&!subgroup){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
         check(vkCreatePipelineLayout(r.device,&pli,nullptr,&r.layout),"pipeline layout");
         const uint32_t* shaderCode=probe_shader;
         size_t shaderBytes=sizeof(probe_shader);
-        if(fused){
+        if(subgroup){
+            if(subgroupProps.subgroupSize==16){shaderCode=gemv_subgroup16_shader;shaderBytes=sizeof(gemv_subgroup16_shader);}
+            else {shaderCode=gemv_subgroup32_shader;shaderBytes=sizeof(gemv_subgroup32_shader);}
+        }else if(fused){
             if(outputsPerGroup==4){shaderCode=gemv_fused4_shader;shaderBytes=sizeof(gemv_fused4_shader);}
             else if(outputsPerGroup==8){shaderCode=gemv_fused8_shader;shaderBytes=sizeof(gemv_fused8_shader);}
             else {shaderCode=gemv_fused16_shader;shaderBytes=sizeof(gemv_fused16_shader);}
@@ -181,7 +198,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.layout,0,1,&set,0,nullptr);
         if(rows){
             uint32_t m=uint32_t(rows);
-            if(!fused)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
+            if(!fused&&!subgroup)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
             if(gemv){
                 for(int d=0;d<dispatches;d++){
                     if(d){
@@ -251,7 +268,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
             double wallMedian=wallUs[wallUs.size()/2];
             double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
             double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;
-            out<<"Vulkan "<<(fused?("GEMV fused-"+std::to_string(outputsPerGroup)):gemv?"GEMV output-major":"MatMul tiled")
+            out<<"Vulkan "<<(subgroup?"GEMV subgroup-reduction":fused?("GEMV fused-"+std::to_string(outputsPerGroup)):gemv?"GEMV output-major":"MatMul tiled")
                <<" "<<rows<<"x1024x8192: PASS | FP16 stored / FP32 accumulate | "<<dispatches<<" dispatch(es)/submit"
                <<" | median GPU "<<(gpuUs.empty()?std::string("unavailable"):std::to_string(gpuMedian/1000.0)+" ms")
                <<" | median queue+fence "<<wallMedian/1000.0<<" ms | min queue+fence "<<wallUs.front()/1000.0

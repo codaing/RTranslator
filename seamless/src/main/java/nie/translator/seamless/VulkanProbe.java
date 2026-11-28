@@ -15,6 +15,7 @@ final class VulkanProbe {
         }catch(LinkageError e){return "Vulkan MatMul unavailable: "+e;}
     }
     static String gemv(int dispatches){return matmul(-dispatches);}
+    static String subgroup(){return matmul(-201);}
     static String fused(int outputs){return matmul(-(100+outputs));}
     private static native String nativeRun(int mode);
 }
