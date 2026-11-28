@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.ArrayAdapter;
 import android.widget.CheckBox;
 import android.widget.Spinner;
 import android.widget.LinearLayout;
@@ -38,6 +39,9 @@ public final class MainActivity extends Activity {
     private Button copyReport;
     private Spinner schedule;
     private CheckBox quietCpu;
+    private Spinner hardware;
+    private CheckBox traceProviders;
+    private static final GpuTuning[] HARDWARE={GpuTuning.CPU,GpuTuning.NNAPI_ALL,GpuTuning.NNAPI_ENCODER,GpuTuning.NNAPI_DECODER,GpuTuning.NNAPI_SYNTHESIS};
 
     private Uri selectedWav;
     private String selectedWavName;
@@ -113,7 +117,7 @@ public final class MainActivity extends Activity {
         panel.addView(benchmarkTitle);
 
         TextView benchmarkHelp = new TextView(this);
-        benchmarkHelp.setText("CPU baseline · 4 intra-op threads · 1 inter-op thread. Model loading and session closing are reported separately from processing RTF.");
+        benchmarkHelp.setText("CPU reference or experimental NNAPI acceleration · CPU stages normally use 4 intra-op threads. Model loading and session closing are reported separately from processing RTF.");
         panel.addView(benchmarkHelp);
 
         schedule = new Spinner(this);
@@ -128,8 +132,16 @@ public final class MainActivity extends Activity {
         quietCpu.setChecked(false);
         panel.addView(quietCpu);
 
+        hardware = new Spinner(this);
+        ArrayAdapter<GpuTuning> accelerators = new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,HARDWARE);
+        accelerators.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        hardware.setAdapter(accelerators);
+        panel.addView(hardware);
+        traceProviders = new CheckBox(this);
+        traceProviders.setText("Trace actual ORT provider execution (diagnostic; slower)");
+        panel.addView(traceProviders);
         runBenchmark = new Button(this);
-        runBenchmark.setText("Run CPU RTF benchmark");
+        runBenchmark.setText("Run WAV RTF benchmark");
         panel.addView(runBenchmark);
         runBenchmark.setOnClickListener(v -> runBenchmark());
 
@@ -243,13 +255,15 @@ public final class MainActivity extends Activity {
         final String wavName = selectedWavName == null ? displayName(wav) : selectedWavName;
         final int updateFrames = new int[]{64,256,0}[schedule.getSelectedItemPosition()];
         final boolean quiet = quietCpu.isChecked();
+        final GpuTuning provider=HARDWARE[hardware.getSelectedItemPosition()];
+        final boolean trace=traceProviders.isChecked();
 
         busy = true;
         benchmarkRunning = true;
         cancelRequested = false;
         lastReport = null;
         reportView.setText("Benchmark running…");
-        status.setText("Reading WAV and preparing CPU model sessions…");
+        status.setText("Reading WAV and preparing model sessions…");
         refreshUi();
 
         worker.execute(() -> {
@@ -260,8 +274,8 @@ public final class MainActivity extends Activity {
                         modelDir(), in,
                         () -> cancelRequested || closed,
                         this::publishStatus,
-                        false, false, quiet, GpuTuning.CPU,
-                        wavName, updateFrames);
+                        false, false, quiet, provider,
+                        wavName, updateFrames, trace);
             } catch (Exception | OutOfMemoryError e) {
                 result = "Benchmark failed or was cancelled:\n" + e;
             }
@@ -324,6 +338,8 @@ public final class MainActivity extends Activity {
                 : "Selected: " + selectedWavName);
         schedule.setEnabled(!busy);
         quietCpu.setEnabled(!busy);
+        hardware.setEnabled(!busy);
+        traceProviders.setEnabled(!busy);
         importModels.setEnabled(!busy);
         chooseWav.setEnabled(!busy);
         runBenchmark.setEnabled(!busy && modelReady && selectedWav != null);

@@ -38,6 +38,12 @@ final class OfflineBenchmark {
     static String run(File dir, InputStream in, BooleanSupplier cancelled, LiveAudio.Status status,
                       boolean xnnpackFp32Stages, boolean nnapiEncoder, boolean quietCpu,
                       GpuTuning gpu, String wavName, int updateFrames) throws Exception {
+        return run(dir,in,cancelled,status,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu,wavName,updateFrames,false);
+    }
+
+    static String run(File dir, InputStream in, BooleanSupplier cancelled, LiveAudio.Status status,
+                      boolean xnnpackFp32Stages, boolean nnapiEncoder, boolean quietCpu,
+                      GpuTuning gpu, String wavName, int updateFrames, boolean traceProviders) throws Exception {
         short[] samples = BenchmarkWav.read(in);
         if (cancelled.getAsBoolean()) throw new CancellationException("Cancelled before model load");
 
@@ -58,11 +64,12 @@ final class OfflineBenchmark {
         final double[] energy = {0};
         int tokens;
         boolean finalEos;
-        String decoderMode, stageReport, tokenFingerprint;
+        String decoderMode, stageReport, tokenFingerprint, providerReport;
+        ProviderProfile profile=traceProviders?new ProviderProfile(dir.getParentFile()):null;
         long pushNanos = 0, pssNanos = 0;
 
         try (StreamingEngine engine = new StreamingEngine(
-                dir, false, xnnpackFp32Stages, nnapiEncoder, quietCpu, gpu, updateFrames)) {
+                dir, false, xnnpackFp32Stages, nnapiEncoder, quietCpu, gpu, updateFrames, profile)) {
             loadMs = SystemClock.elapsedRealtime() - loadStart;
             peak[0] = Math.max(peak[0], Debug.getPss());
             if (cancelled.getAsBoolean()) throw new CancellationException("Cancelled after model load");
@@ -113,6 +120,7 @@ final class OfflineBenchmark {
             tokenFingerprint = engine.tokenFingerprint();
             stageReport = engine.stats.report();
             computeWallNanos = System.nanoTime() - computeStartNanos;
+            providerReport=engine.providerReport();
             closeStartNanos = System.nanoTime();
         }
 
@@ -127,7 +135,7 @@ final class OfflineBenchmark {
                 "OFFLINE WAV RTF BENCHMARK\n" +
                 "Device: %s | Android %s (SDK %d)\n" +
                 "Runtime: ONNX Runtime Android 1.30.0 | CPU intra-op 4 / inter-op 1\n" +
-                "Decoder: %s | Execution provider: CPU\n" +
+                "Decoder: %s | Requested provider profile: "+gpu+"\n" +
                 "WAV: %s\n" +
                 "Input PCM SHA-256: %s\n" +
                 "Model manifest SHA-256: %s\n" +
@@ -152,6 +160,9 @@ final class OfflineBenchmark {
                 + "\nQuiet CPU thread pools: " + quietCpu
                 + "\nFinal decoder EOS reached: " + finalEos
                 + "\nOutput completeness screen (EOS and nonempty audio): " + (finalEos&&generated[0]>0?"PASS":"FAIL")
+                + "\nProvider profiling enabled: " + traceProviders
+                + (traceProviders?" (diagnostic timings; profiling adds overhead)":"")
+                + "\n" + providerReport
                 + "\nRequested experimental providers: " + gpu
                 + "\nToken SHA-256: " + tokenFingerprint
                 + "\nPSS sampling overhead: " + String.format(Locale.US, "%.3f s", pssNanos / 1e9)

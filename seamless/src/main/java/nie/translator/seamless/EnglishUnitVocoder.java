@@ -26,11 +26,16 @@ public final class EnglishUnitVocoder implements AutoCloseable {
         this(modelPath,quietCpu,GpuTuning.CPU);
     }
     EnglishUnitVocoder(String modelPath,boolean quietCpu,GpuTuning gpu) throws OrtException {
+        this(modelPath,quietCpu,gpu,null);
+    }
+    EnglishUnitVocoder(String modelPath,boolean quietCpu,GpuTuning gpu,ProviderProfile profile) throws OrtException {
         environment = OrtEnvironment.getEnvironment();
         try (OrtSession.SessionOptions options = new OrtSession.SessionOptions()) {
             if(quietCpu)CpuTuning.quiet(options,false);
             gpu.configure(options,"vocoder.onnx");
+            if(profile!=null)profile.configure(options,"vocoder.onnx");
             session = environment.createSession(modelPath, options);
+            if(profile!=null)profile.register("vocoder.onnx",session);
         }
     }
 

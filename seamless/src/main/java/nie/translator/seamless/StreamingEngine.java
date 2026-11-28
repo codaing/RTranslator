@@ -25,6 +25,8 @@ final class StreamingEngine implements AutoCloseable {
     private final boolean quietCpu;
     private final GpuTuning gpu;
     private final int updateFrames;
+    private final ProviderProfile providerProfile;
+    String providerReport(){return providerProfile==null?"Provider tracing: off":providerProfile.finish();}
     private boolean finalEos;
     boolean finalEos(){return finalEos;}
     final StageStats stats=new StageStats();
@@ -46,6 +48,10 @@ final class StreamingEngine implements AutoCloseable {
         this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu,UPDATE_INTERVAL_FRAMES);
     }
     StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu,int updateFrames)throws Exception{
+        this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu,updateFrames,null);
+    }
+    StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu,int updateFrames,ProviderProfile profile)throws Exception{
+        this.providerProfile=profile;
         if(updateFrames<0)throw new IllegalArgumentException("negative update interval");
         this.updateFrames=updateFrames;
         this.adaptive=adaptive;this.quietCpu=quietCpu;this.gpu=Objects.requireNonNull(gpu);
@@ -68,7 +74,7 @@ final class StreamingEngine implements AutoCloseable {
                 cacheLayout.check(decoder,projection);
             }else decoder=open(dir,"decoder.int8.onnx");
             units=open(dir,"units.onnx");
-            vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath(),quietCpu,gpu);
+            vocoder=new EnglishUnitVocoder(new File(dir,"vocoder.onnx").getAbsolutePath(),quietCpu,gpu,providerProfile);
         }catch(Exception|OutOfMemoryError e){try{close();}catch(Exception ignored){}throw e;}
     }
     private OrtSession open(File dir,String name)throws OrtException{
@@ -97,8 +103,10 @@ final class StreamingEngine implements AutoCloseable {
                 android.util.Log.i("SeamlessModels","XNNPACK requested for "+name);
             }
             gpu.configure(o,name);
+            if(providerProfile!=null)providerProfile.configure(o,name);
             long start=android.os.SystemClock.elapsedRealtime();
             OrtSession session=env.createSession(new File(dir,name).getAbsolutePath(),o);
+            if(providerProfile!=null)providerProfile.register(name,session);
             android.util.Log.i("SeamlessModels","loaded "+name+" in "+(android.os.SystemClock.elapsedRealtime()-start)+" ms, PSS="+android.os.Debug.getPss()+" KiB");
             return session;
         }
@@ -218,6 +226,7 @@ final class StreamingEngine implements AutoCloseable {
     }
     @Override public void close()throws Exception{
         Exception first=null;
+        if(providerProfile!=null)providerProfile.finish();
         for(AutoCloseable c:new AutoCloseable[]{vocoder,units,decoder,projection,encoder})if(c!=null)try{c.close();}catch(Exception e){if(first==null)first=e;}
         if(first!=null)throw first;
     }

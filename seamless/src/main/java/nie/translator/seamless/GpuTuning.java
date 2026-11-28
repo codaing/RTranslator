@@ -2,6 +2,8 @@ package nie.translator.seamless;
 
 import ai.onnxruntime.*;
 import java.util.Collections;
+import java.util.EnumSet;
+import ai.onnxruntime.providers.NNAPIFlags;
 import java.security.MessageDigest;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -13,7 +15,11 @@ enum GpuTuning {
     ENCODER(1,"WebGPU encoder"),
     ACOUSTIC(4,"WebGPU UnitY2"),
     FP16(14,"WebGPU decoder + projections + UnitY2 + vocoder"),
-    ALL(15,"WebGPU all stages");
+    ALL(15,"WebGPU all stages"),
+    NNAPI_ENCODER(1,"NNAPI encoder (non-CPU devices)"),
+    NNAPI_DECODER(2,"NNAPI decoder + projections (non-CPU devices)"),
+    NNAPI_SYNTHESIS(12,"NNAPI acoustic units + vocoder (non-CPU devices)"),
+    NNAPI_ALL(15,"NNAPI all stages (non-CPU devices)");
     private final int mask;
     private final String label;
     GpuTuning(int mask,String label){this.mask=mask;this.label=label;}
@@ -33,15 +39,26 @@ enum GpuTuning {
         return (mask&bit)!=0;
     }
     void requireAvailable(){
+        if(isNnapi()){
+            if(!OrtEnvironment.getAvailableProviders().toString().contains("NNAPI"))
+                throw new IllegalStateException("NNAPI is not available in this Android runtime");
+            return;
+        }
         if(this!=CPU&&!OrtEnvironment.getAvailableProviders().toString().contains("WEBGPU"))
             throw new IllegalStateException("WebGPU is not available in this Android runtime");
     }
     void configure(OrtSession.SessionOptions options,String name)throws OrtException{
         if(!uses(name))return;
+        if(isNnapi()){
+            options.addNnapi(EnumSet.of(NNAPIFlags.CPU_DISABLED));
+            android.util.Log.i("SeamlessModels","NNAPI non-CPU devices requested for "+name+"; ORT CPU fallback allowed");
+            return;
+        }
         options.addWebGPU(Collections.emptyMap());
         android.util.Log.i("SeamlessModels","WebGPU requested for "+name+"; CPU fallback allowed");
     }
-    boolean needsFp16Probe(){return (mask&14)!=0;}
+    boolean isNnapi(){return name().startsWith("NNAPI_");}
+    boolean needsFp16Probe(){return !isNnapi()&&(mask&14)!=0;}
     static boolean missingShaderF16(OrtException e){
         String message=e.getMessage();
         return message!=null&&message.contains("requires f16")&&message.contains("device does not support it");
