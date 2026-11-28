@@ -1,0 +1,36 @@
+#version 450
+#ifndef OUTS
+#define OUTS 4
+#endif
+// One 32-lane subgroup computes OUTS independent output channels.
+// Each lane loads the activation pair once and reuses it across OUTS weights.
+// Weights are output-major packed FP16; accumulation remains FP32.
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+shared float partial[OUTS][32];
+void main(){
+    const uint K=1024u,N=8192u;
+    uint lane=gl_LocalInvocationID.x;
+    uint first=gl_WorkGroupID.x*OUTS;
+    float accum[OUTS];
+    for(uint o=0u;o<OUTS;o++)accum[o]=0.0;
+    for(uint p=lane;p<K/2u;p+=32u){
+        vec2 a=vec2(uintBitsToFloat(data.v[2u*p]),uintBitsToFloat(data.v[2u*p+1u]));
+        for(uint o=0u;o<OUTS;o++){
+            uint base=K+(first+o)*(K/2u);
+            vec2 w=unpackHalf2x16(data.v[base+p]);
+            accum[o]+=dot(a,w);
+        }
+    }
+    for(uint o=0u;o<OUTS;o++)partial[o][lane]=accum[o];
+    barrier();
+    for(uint offset=16u;offset>0u;offset>>=1u){
+        if(lane<offset){
+            for(uint o=0u;o<OUTS;o++)partial[o][lane]+=partial[o][lane+offset];
+        }
+        barrier();
+    }
+    if(lane==0u){
+        for(uint o=0u;o<OUTS;o++)data.v[K+K*N/2u+first+o]=floatBitsToUint(partial[o][0]);
+    }
+}

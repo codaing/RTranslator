@@ -37,7 +37,7 @@ public final class MainActivity extends Activity {
         ArrayAdapter<GpuTuning> gpuAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,GpuTuning.values());
         gpuAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         gpuProfile.setAdapter(gpuAdapter);gpuProfile.setSelection(0);panel.addView(gpuProfile);
-        probeGpu=new Button(this);probeGpu.setText("Test native Vulkan speed (no model needed)");panel.addView(probeGpu);
+        probeGpu=new Button(this);probeGpu.setText("Test native Vulkan kernels (no model needed)");panel.addView(probeGpu);
         probeGpu.setOnClickListener(v->runGpuProbe());
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
@@ -103,8 +103,8 @@ public final class MainActivity extends Activity {
                 report.append("\n").append(VulkanProbe.run());
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(1));
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(32));
-                if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(false));
-                if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(true));
+                for(int d:new int[]{1,4,8,16,32})if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(d));
+                for(int o:new int[]{4,8,16})if(!stopRequested)report.append("\n").append(VulkanProbe.fused(o));
                 report.append("\nWebGPU retry deferred: repeated Pixel readback timeout.");
             }catch(Exception|OutOfMemoryError e){report.append("\nProbe failed: ").append(e);}
             finally{

@@ -10,6 +10,9 @@
 #include "probe_shader.h"
 #include "matmul_shader.h"
 #include "gemv_shader.h"
+#include "gemv_fused4_shader.h"
+#include "gemv_fused8_shader.h"
+#include "gemv_fused16_shader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -29,6 +32,7 @@ struct Resources {
     VkPipeline pipeline=VK_NULL_HANDLE;
     VkCommandPool commands=VK_NULL_HANDLE;
     VkFence fence=VK_NULL_HANDLE;
+    VkQueryPool queryPool=VK_NULL_HANDLE;
     void* mapped=nullptr;
     bool pending=false;
     ~Resources(){
@@ -37,6 +41,7 @@ struct Resources {
         if(pending)return;
         if(device){
             if(mapped)vkUnmapMemory(device,memory);
+            if(queryPool)vkDestroyQueryPool(device,queryPool,nullptr);
             if(fence)vkDestroyFence(device,fence,nullptr);
             if(commands)vkDestroyCommandPool(device,commands,nullptr);
             if(pipeline)vkDestroyPipeline(device,pipeline,nullptr);
@@ -59,19 +64,19 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
     if(timedOut.load())return env->NewStringUTF("Direct Vulkan: previous queue failure; restart app before retry");
     Resources r;
     try{
-        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="Seamless compute diagnostic";app.apiVersion=VK_API_VERSION_1_0;
+        VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="Seamless compute diagnostic";app.apiVersion=VK_API_VERSION_1_2;
         VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};ici.pApplicationInfo=&app;
         check(vkCreateInstance(&ici,nullptr,&r.instance),"vkCreateInstance");
         uint32_t n=0;check(vkEnumeratePhysicalDevices(r.instance,&n,nullptr),"enumerate device count");
         if(!n)throw std::runtime_error("no Vulkan device");
         std::vector<VkPhysicalDevice> devices(n);check(vkEnumeratePhysicalDevices(r.instance,&n,devices.data()),"enumerate devices");
-        VkPhysicalDevice physical=VK_NULL_HANDLE;uint32_t family=0;int best=-1;
+        VkPhysicalDevice physical=VK_NULL_HANDLE;uint32_t family=0,timestampBits=0;int best=-1;
         for(auto d:devices){
             VkPhysicalDeviceProperties p{};vkGetPhysicalDeviceProperties(d,&p);
             uint32_t qn=0;vkGetPhysicalDeviceQueueFamilyProperties(d,&qn,nullptr);
             std::vector<VkQueueFamilyProperties> qs(qn);vkGetPhysicalDeviceQueueFamilyProperties(d,&qn,qs.data());
             int score=p.deviceType==VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU?3:p.deviceType==VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU?2:p.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU?0:1;
-            for(uint32_t i=0;i<qn;i++)if(qs[i].queueCount&&(qs[i].queueFlags&VK_QUEUE_COMPUTE_BIT)&&score>best){physical=d;family=i;best=score;break;}
+            for(uint32_t i=0;i<qn;i++)if(qs[i].queueCount&&(qs[i].queueFlags&VK_QUEUE_COMPUTE_BIT)&&score>best){physical=d;family=i;timestampBits=qs[i].timestampValidBits;best=score;break;}
         }
         if(!physical)throw std::runtime_error("no compute queue");
         VkPhysicalDeviceProperties prop{};vkGetPhysicalDeviceProperties(physical,&prop);
@@ -80,19 +85,29 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
         check(vkCreateDevice(physical,&di,nullptr,&r.device),"vkCreateDevice");
         VkQueue queue;vkGetDeviceQueue(r.device,family,0,&queue);
-        // mode -1: output-major packed weights + specialized GEMV.
-        // mode -8: same GEMV, eight dispatches per submission (warm same weights).
+        if(timestampBits&&prop.limits.timestampComputeAndGraphics){
+            VkQueryPoolCreateInfo qpi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            qpi.queryType=VK_QUERY_TYPE_TIMESTAMP;qpi.queryCount=2;
+            check(vkCreateQueryPool(r.device,&qpi,nullptr,&r.queryPool),"timestamp query pool");
+        }
+        // Positive modes are tiled GEMM; negative -1..-32 are repeated
+        // baseline GEMV dispatches; -104/-108/-116 are fused 4/8/16-output kernels.
         const bool gemv=mode<0;
-        const int dispatches=mode==-8?8:1;
+        const bool fused=mode<=-104;
+        const int dispatches=fused?1:(gemv?-mode:1);
+        const uint32_t outputsPerGroup=fused?uint32_t(-mode-100):4u;
         const int rows=gemv?1:mode;
-        if(mode!=-1&&mode!=-8&&mode!=0&&mode!=1&&mode!=32)throw std::runtime_error("unsupported probe mode");
+        const bool validMode=mode==0||mode==1||mode==32||mode==-1||mode==-4||mode==-8||
+            mode==-16||mode==-32||mode==-104||mode==-108||mode==-116;
+        if(!validMode)throw std::runtime_error("unsupported probe mode");
         constexpr uint32_t K=1024,N=8192;
         const uint32_t aCount=uint32_t(rows)*K;
         const uint32_t bCount=K*N/2;
         const uint32_t cCount=uint32_t(rows)*N;
         const VkDeviceSize bytes=rows?VkDeviceSize(aCount+bCount+cCount)*4:16*sizeof(float);
         if(bytes>prop.limits.maxStorageBufferRange)throw std::runtime_error("storage buffer limit");
-        if(rows&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
+        if(rows&&!fused&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
+        if(fused&&(prop.limits.maxComputeWorkGroupInvocations<32||prop.limits.maxComputeWorkGroupSize[0]<32))throw std::runtime_error("fused workgroup limit");
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         check(vkCreateBuffer(r.device,&bi,nullptr,&r.buffer),"vkCreateBuffer");
         VkMemoryRequirements req{};vkGetBufferMemoryRequirements(r.device,r.buffer,&req);
@@ -138,9 +153,17 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         vkUpdateDescriptorSets(r.device,1,&w,0,nullptr);
         VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,4};
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pli.setLayoutCount=1;pli.pSetLayouts=&r.setLayout;
-        if(rows){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
+        if(rows&&!fused){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
         check(vkCreatePipelineLayout(r.device,&pli,nullptr,&r.layout),"pipeline layout");
-        VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};si.codeSize=gemv?sizeof(gemv_shader):rows?sizeof(matmul_shader):sizeof(probe_shader);si.pCode=gemv?gemv_shader:rows?matmul_shader:probe_shader;
+        const uint32_t* shaderCode=probe_shader;
+        size_t shaderBytes=sizeof(probe_shader);
+        if(fused){
+            if(outputsPerGroup==4){shaderCode=gemv_fused4_shader;shaderBytes=sizeof(gemv_fused4_shader);}
+            else if(outputsPerGroup==8){shaderCode=gemv_fused8_shader;shaderBytes=sizeof(gemv_fused8_shader);}
+            else {shaderCode=gemv_fused16_shader;shaderBytes=sizeof(gemv_fused16_shader);}
+        }else if(gemv){shaderCode=gemv_shader;shaderBytes=sizeof(gemv_shader);}
+        else if(rows){shaderCode=matmul_shader;shaderBytes=sizeof(matmul_shader);}
+        VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};si.codeSize=shaderBytes;si.pCode=shaderCode;
         check(vkCreateShaderModule(r.device,&si,nullptr,&r.shader),"shader module");
         VkComputePipelineCreateInfo pci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};pci.layout=r.layout;pci.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;pci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pci.stage.module=r.shader;pci.stage.pName="main";
         check(vkCreateComputePipelines(r.device,VK_NULL_HANDLE,1,&pci,nullptr,&r.pipeline),"compute pipeline");
@@ -150,11 +173,15 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         VkCommandBuffer cmd;check(vkAllocateCommandBuffers(r.device,&cai,&cmd),"command buffer");
         VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};begin.flags=0;
         check(vkBeginCommandBuffer(cmd,&begin),"begin command");
+        if(r.queryPool){
+            vkCmdResetQueryPool(cmd,r.queryPool,0,2);
+            vkCmdWriteTimestamp(cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,r.queryPool,0);
+        }
         vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.pipeline);
         vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.layout,0,1,&set,0,nullptr);
         if(rows){
             uint32_t m=uint32_t(rows);
-            vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
+            if(!fused)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
             if(gemv){
                 for(int d=0;d<dispatches;d++){
                     if(d){
@@ -162,54 +189,75 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
                         waw.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;waw.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
                         vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&waw,0,nullptr,0,nullptr);
                     }
-                    vkCmdDispatch(cmd,N/4,1,1);
+                    vkCmdDispatch(cmd,N/outputsPerGroup,1,1);
                 }
             }else vkCmdDispatch(cmd,N/16,(m+7)/8,1);
         }else vkCmdDispatch(cmd,1,1,1);
+        if(r.queryPool)vkCmdWriteTimestamp(cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.queryPool,1);
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
         check(vkEndCommandBuffer(cmd),"end command");
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};check(vkCreateFence(r.device,&fi,nullptr,&r.fence),"fence");
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&cmd;
-        std::vector<long long> timings;
-        const int repeats=rows?6:1;
-        for(int repeat=0;repeat<repeats;repeat++){
+        std::vector<double> wallUs,gpuUs;
+        const int warmupSubmissions=rows?std::max(1,(32+dispatches-1)/dispatches):1;
+        const int measuredSubmissions=rows?11:1;
+        if(rows){
+            auto words=static_cast<uint32_t*>(r.mapped);
+            std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
+        }
+        for(int repeat=0;repeat<warmupSubmissions+measuredSubmissions;repeat++){
             if(repeat)check(vkResetFences(r.device,1,&r.fence),"reset fence");
-            // Poison output on every run, including warmups, to detect stale results.
-            if(rows){
-                auto words=static_cast<uint32_t*>(r.mapped);
-                std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
-            }
             auto t=std::chrono::steady_clock::now();
             check(vkQueueSubmit(queue,1,&submit,r.fence),"queue submit");
             r.pending=true;
             VkResult wait=vkWaitForFences(r.device,1,&r.fence,VK_TRUE,5000000000ULL);
             if(wait!=VK_SUCCESS){timedOut.store(true);throw std::runtime_error("fence wait VkResult="+std::to_string(wait)+"; restart app before retry");}
             r.pending=false;
-            auto micros=std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-t).count();
-            if(!rows||repeat)timings.push_back(micros);
-            if(rows){
-                // Every element must be finite; 64 distributed values checked against CPU dot products.
-                auto words=static_cast<uint32_t*>(r.mapped);
-                for(uint32_t i=0;i<cCount;i++){
-                    float f;std::memcpy(&f,words+aCount+bCount+i,4);
-                    if(!std::isfinite(f))throw std::runtime_error("unwritten or nonfinite matrix output");
+            double elapsed=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-t).count();
+            if(repeat>=warmupSubmissions){
+                wallUs.push_back(elapsed);
+                if(r.queryPool){
+                    uint64_t ts[2]={0,0};
+                    VkResult qr=vkGetQueryPoolResults(r.device,r.queryPool,0,2,sizeof(ts),ts,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT);
+                    if(qr!=VK_SUCCESS)throw std::runtime_error("timestamp query result VkResult="+std::to_string(qr));
+                    uint64_t delta=ts[1]-ts[0];
+                    if(timestampBits<64)delta&=((uint64_t(1)<<timestampBits)-1);
+                    gpuUs.push_back(double(delta)*prop.limits.timestampPeriod/1000.0);
                 }
-                for(uint32_t j=0;j<64;j++){
-                    uint32_t m=j%uint32_t(rows), n=(j*127u+j*j*11u)%N;
-                    float expected=0;
-                    for(uint32_t k=0;k<K;k++)expected+=av(m,k)*weights[wi(k,n)];
-                    float got;std::memcpy(&got,words+aCount+bCount+m*N+n,4);
-                    if(std::abs(got-expected)>1e-4f)throw std::runtime_error("matrix readback mismatch");
-                }
-            }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
+            }
         }
-        std::sort(timings.begin(),timings.end());
         if(rows){
-            auto median=timings[timings.size()/2];
-            out<<"Vulkan "<<(gemv?"GEMV output-major":"MatMul tiled")<<" "<<rows<<"x1024x8192: PASS | FP16 stored / FP32 accumulate | "<<dispatches<<" dispatch(es)/submit | median "<<median/1000.0<<" ms | min "<<timings.front()/1000.0<<" ms | median per dispatch "<<median/(1000.0*dispatches)<<" ms | "<<(2.0*rows*K*N*dispatches/std::max(1LL,median)/1000.0)<<" GFLOP/s | 5 warm runs, queue+fence; excludes setup";
-            if(dispatches>1)out<<" | repeated same weights, final output checked";
-        }else out<<"Direct Vulkan compute/readback: PASS ("<<timings[0]<<" us queue + fence; synthetic only)";
+            // Validate the final output only after all timings to avoid CPU-side
+            // reference work perturbing device clocks between measured submits.
+            auto words=static_cast<uint32_t*>(r.mapped);
+            for(uint32_t i=0;i<cCount;i++){
+                float f;std::memcpy(&f,words+aCount+bCount+i,4);
+                if(!std::isfinite(f))throw std::runtime_error("unwritten or nonfinite matrix output");
+            }
+            for(uint32_t j=0;j<64;j++){
+                uint32_t m=j%uint32_t(rows), n=(j*127u+j*j*11u)%N;
+                float expected=0;
+                for(uint32_t k=0;k<K;k++)expected+=av(m,k)*weights[wi(k,n)];
+                float got;std::memcpy(&got,words+aCount+bCount+m*N+n,4);
+                if(std::abs(got-expected)>1e-4f)throw std::runtime_error("matrix readback mismatch");
+            }
+        }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
+        std::sort(wallUs.begin(),wallUs.end());
+        std::sort(gpuUs.begin(),gpuUs.end());
+        if(rows){
+            double wallMedian=wallUs[wallUs.size()/2];
+            double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
+            double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;
+            out<<"Vulkan "<<(fused?("GEMV fused-"+std::to_string(outputsPerGroup)):gemv?"GEMV output-major":"MatMul tiled")
+               <<" "<<rows<<"x1024x8192: PASS | FP16 stored / FP32 accumulate | "<<dispatches<<" dispatch(es)/submit"
+               <<" | median GPU "<<(gpuUs.empty()?std::string("unavailable"):std::to_string(gpuMedian/1000.0)+" ms")
+               <<" | median queue+fence "<<wallMedian/1000.0<<" ms | min queue+fence "<<wallUs.front()/1000.0
+               <<" ms | GPU us/dispatch "<<(gpuUs.empty()?0:gpuMedian/dispatches)
+               <<" | "<<(2.0*rows*K*N*dispatches/std::max(1.0,kernelUs)/1000.0)<<" GFLOP/s"
+               <<" | 32 warmup dispatches, 11 measured submissions; excludes setup";
+            if(dispatches>1)out<<" | repeated same weights; final output checked";
+        }else out<<"Direct Vulkan compute/readback: PASS ("<<wallUs[0]<<" us queue + fence; synthetic only)";
         if(prop.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU)out<<" [software CPU device]";
     }catch(const std::exception& e){out<<"Direct Vulkan: FAIL "<<e.what();}
     return env->NewStringUTF(out.str().c_str());
