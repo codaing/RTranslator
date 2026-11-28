@@ -17,7 +17,7 @@ permissions:
 jobs:
   compact:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -29,6 +29,12 @@ jobs:
           path: tpu-capture
           run-id: '46126098483'
           github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-real-FFN-row-split-group-sweep-TPU-benchmark
+          path: tail-benchmark
+          run-id: '46137019969'
+          github-token: ${{ github.token }}
       - name: Install converter
         run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
       - name: Convert and verify compact FFNs
@@ -37,10 +43,29 @@ jobs:
           cp seamless-port/audit_compact_ffn.py seamless-port/benchmark_compact_ffn.sh compact-benchmark/
           cp seamless-port/benchmark_compact_ffn_repeat.sh seamless-port/summarize_compact_ffn_repeat.py compact-benchmark/
           cp seamless-port/test_compact_ffn_repeat.py compact-benchmark/
+          cp tail-benchmark/ffn-m31-m31-prefill-tail-g64-int8.tflite compact-benchmark/
+          cp tail-benchmark/manifest.json compact-benchmark/tail-manifest.json
+          cp seamless-port/benchmark_mixed_ffn_inprocess.sh compact-benchmark/
           bash -n compact-benchmark/benchmark_compact_ffn.sh
+          bash -n compact-benchmark/benchmark_compact_ffn_repeat.sh
+          bash -n compact-benchmark/benchmark_mixed_ffn_inprocess.sh
           bash -n compact-benchmark/benchmark_compact_ffn_repeat.sh
           cd compact-benchmark
           python -m unittest -v test_compact_ffn_repeat.py
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Install Android SDK and build in-process test APKs
+        run: |
+          set +o pipefail
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
+          set -o pipefail
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          ./gradlew -PseamlessOnly :seamless:assembleDebug :seamless:assembleDebugAndroidTest --stacktrace --no-daemon --max-workers=2
+          cp seamless/build/outputs/apk/debug/seamless-debug.apk compact-benchmark/
+          cp seamless/build/outputs/apk/androidTest/debug/seamless-debug-androidTest.apk compact-benchmark/
       - uses: actions/upload-artifact@v4
         if: always()
         with:

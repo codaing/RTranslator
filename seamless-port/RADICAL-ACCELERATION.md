@@ -162,3 +162,14 @@ This is a repeatability experiment, not an integrated CPU+TPU execution measurem
 
 
 Repeatability parser hardening: every device output must also match its host TFLite output within NRMS 1e-5, in addition to the source-reference global and fixed-32-channel 5% gates. Device battery and thermal snapshots are recorded both before and after each measured run.
+
+
+## Same-process mixed CPU + Edge TPU FFN harness (2026-11-28)
+
+The compact artifact now includes the full M=32 held-out activation/reference, the compact k512 FP32 model, the M31 g64 INT8 model and its output-order/quantization manifest, plus a debug APK and instrumentation APK. The experimental seamless module adds TensorFlow Lite 2.19.1; the production app module is unchanged.
+
+MixedFfnBenchmark keeps both interpreters alive in one Android instrumentation process. The first row runs with XNNPACK on CPU. The remaining 31 rows are quantized with the model input scale/zero point and run with NNAPI accelerator google-edgetpu, NNAPI CPU disabled. All 16 int8 output tensors are dequantized in manifest order and reassembled. The timed call includes first-row input marshaling, CPU inference, tail quantization, TPU inference, output dequantization and row reassembly. A CPU-only tail interpreter is used once before timing to require byte-exact parity with TPU output. The test checks global, worst-row and fixed-32-channel NRMS <5%.
+
+Run benchmark_mixed_ffn_inprocess.sh from the compact artifact directory. The script installs the debug app/test APKs and stages/retrieves all fixture files under run-as nie.translator.seamless. ActivityManager instrumentation launch and APK install remain shell operations; no direct shell access to app-private paths is used. The script requires logs confirming all 17 INT8 tail nodes were delegated to google-edgetpu and both compact FP32 nodes to XNNPACK.
+
+This is a same-process FFN microbenchmark, not integration into StreamingEngine or end-to-end speech. The production seamless runtime currently uses ONNX Runtime; replacing a decoder FFN with this TFLite pair still requires a separate graph/runtime integration and held-out speech validation.

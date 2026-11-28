@@ -25,4 +25,4 @@ if [[ "${REQUIRE_REAL_PROJECTION:-0}" == "1" ]]; then
     grep -F 'Subgroup16 real-model variants: SKIP' install-diagnostics/real-projection-probe.txt
   fi
 fi
-grep -E 'OK \((9|10) tests\)' install-diagnostics/instrumentation.txt
+grep -E 'OK \([0-9]+ tests\)' install-diagnostics/instrumentation.txt

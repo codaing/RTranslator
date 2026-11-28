@@ -81,6 +81,15 @@ def convert(source, dest):
     }
     (dest / "first-row.input.bin").write_bytes(x[test].astype("<f4").tobytes())
     (dest / "first-row.source-reference.bin").write_bytes(y[test].astype("<f4").tobytes())
+    with np.load(source / cases[test][0], allow_pickle=False) as heldout:
+        full_x = heldout["x"].astype(np.float32)
+        full_y = heldout["y"].astype(np.float32)
+    if full_x.shape != (32, 1024) or full_y.shape != (32, 1024):
+        raise ValueError("held-out fixture must contain the complete M=32 FFN input/output")
+    if not np.array_equal(full_x[0], x[test]) or not np.array_equal(full_y[0], y[test]):
+        raise ValueError("first-row fixture does not match full M=32 capture")
+    (dest / "mixed-full32-input.f32").write_bytes(full_x.astype("<f4").tobytes())
+    (dest / "mixed-full32-reference.f32").write_bytes(full_y.astype("<f4").tobytes())
     for k in WIDTHS:
         ids = np.sort(ranking[:k])
         omitted = np.ones(8192, dtype=bool)
