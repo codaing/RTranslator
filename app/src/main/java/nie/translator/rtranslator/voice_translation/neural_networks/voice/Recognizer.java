@@ -612,6 +612,7 @@ public class Recognizer extends NeuralNetworkApi {
 
                     long asrElapsedMs = SystemClock.elapsedRealtime() - startTimeInMs;
                     long audioDurationMs = data.data.length * 1000L / Recorder.SAMPLE_RATE_CANDIDATES[0];
+                    android.util.Log.i("performance", "SPEECH RECOGNITION DONE IN: " + asrElapsedMs + "ms");
                     android.util.Log.i("SpeechPipeline", "ASR_DONE elapsed_ms=" + asrElapsedMs
                             + " audio_ms=" + audioDurationMs + " beam=" + data.beamSize
                             + " batch=" + batchSize + " tokens="
