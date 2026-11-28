@@ -43,21 +43,56 @@ jobs:
           "$SDKMANAGER" --version | tee -a gpu-reports/android-sdk.log
           df -h . | tee gpu-reports/disk.txt
           free -h | tee gpu-reports/memory.txt
-      - name: Fetch matching upstream ORT source
+      - name: Fetch matching upstream ORT source (isolated checkout)
+        id: ort_checkout
+        continue-on-error: true
+        uses: actions/checkout@v4
+        with:
+          repository: microsoft/onnxruntime
+          ref: v1.30.0
+          path: ort-source
+          fetch-depth: 1
+          persist-credentials: false
+          submodules: recursive
+      - name: Fetch official release archive if checkout is unavailable
+        if: steps.ort_checkout.outcome == 'failure'
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch "$ORT_TAG" https://github.com/microsoft/onnxruntime.git ort-source
-          git -C ort-source rev-parse HEAD | tee gpu-reports/ort-source-sha.txt
+          rm -rf ort-source
+          mkdir -p ort-source
+          curl --fail --location --retry 3 --retry-all-errors \
+            "https://codeload.github.com/microsoft/onnxruntime/tar.gz/refs/tags/$ORT_TAG" \
+            -o "$RUNNER_TEMP/ort-source.tar.gz" 2>&1 | tee gpu-reports/source-download.log
+          sha256sum "$RUNNER_TEMP/ort-source.tar.gz" | tee gpu-reports/source-archive-sha256.txt
+          tar -xzf "$RUNNER_TEMP/ort-source.tar.gz" --strip-components=1 -C ort-source
+          rm "$RUNNER_TEMP/ort-source.tar.gz"
+      - name: Verify source version and build interface
+        run: |
+          set -euo pipefail
           cd ort-source
-          git submodule update --init --recursive --depth 1
+          test "$(tr -d '[:space:]' < VERSION_NUMBER)" = "${ORT_TAG#v}"
+          if test -d .git; then
+            git rev-parse HEAD | tee ../gpu-reports/ort-source-sha.txt
+            git submodule status --recursive | tee ../gpu-reports/submodules.txt
+            if grep -Eq '^[-+U]' ../gpu-reports/submodules.txt; then
+              echo "Upstream submodules are incomplete"; exit 1
+            fi
+            echo "ORT_ARCHIVE_SOURCE=0" >> "$GITHUB_ENV"
+          else
+            echo "ORT_ARCHIVE_SOURCE=1" >> "$GITHUB_ENV"
+            echo "Official tagged archive; git submodules not included. CMake must resolve its pinned dependencies." | tee ../gpu-reports/source-mode.txt
+          fi
           python tools/ci_build/build.py --help > ../gpu-reports/build-help.txt
           grep -q -- '--use_webgpu' ../gpu-reports/build-help.txt
           grep -q -- '--build_java' ../gpu-reports/build-help.txt
+          grep -q -- '--skip_submodule_sync' ../gpu-reports/build-help.txt
       - name: Cross-compile full runtime with native WebGPU and Java bindings
         run: |
           set -euo pipefail
           cd ort-source
-          ./build.sh --config Release --build_dir "$GITHUB_WORKSPACE/ort-build" \
+          EXTRA=()
+          if [[ "$ORT_ARCHIVE_SOURCE" == 1 ]]; then EXTRA+=(--skip_submodule_sync); fi
+          ./build.sh "${EXTRA[@]}" --config Release --build_dir "$GITHUB_WORKSPACE/ort-build" \
             --android --android_sdk_path "$ANDROID_HOME" \
             --android_ndk_path "$ANDROID_HOME/ndk/$NDK_VERSION" \
             --android_abi arm64-v8a --android_api 28 --cmake_generator Ninja \
