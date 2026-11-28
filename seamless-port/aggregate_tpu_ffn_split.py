@@ -28,7 +28,6 @@ def main():
     parser.add_argument("--first-group-size", type=int, required=True)
     parser.add_argument("--tail-group-size", type=int, required=True)
     parser.add_argument("--first-fp32-output", default=None)
-    parser.add_argument("--first-fp32-output", default=None)
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
