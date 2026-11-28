@@ -120,9 +120,9 @@ public final class MainActivity extends Activity {
         busy=true;stopRequested=false;lastReport=null;buttons();
         show("Running balanced Vulkan kernel comparison…");
         worker.execute(()->{
-            StringBuilder report=new StringBuilder("Balanced Vulkan kernel comparison (synthetic; no CPU fallback)\\nDevice "+android.os.Build.MODEL);
+            StringBuilder report=new StringBuilder("Balanced Vulkan kernel comparison (synthetic; no CPU fallback)\nDevice "+android.os.Build.MODEL);
             try{
-                report.append("\\nAndroid ").append(android.os.Build.VERSION.RELEASE)
+                report.append("\nAndroid ").append(android.os.Build.VERSION.RELEASE)
                       .append(" | SDK ").append(android.os.Build.VERSION.SDK_INT);
                 String[] labels={"subgroup-reduction","output-major","fused-4"};
                 // A 3x3 Latin-square schedule places each candidate in every
@@ -136,30 +136,30 @@ public final class MainActivity extends Activity {
                         int which=schedule[round][slot];
                         String result=which==0?VulkanProbe.subgroup():
                             which==1?VulkanProbe.gemv(1):VulkanProbe.fused(4);
-                        report.append("\\nRound ").append(round+1).append(" position ").append(slot+1)
+                        report.append("\nRound ").append(round+1).append(" position ").append(slot+1)
                               .append(" [").append(labels[which]).append("]: ").append(result);
                         java.util.regex.Matcher match=timing.matcher(result);
                         if(match.find()&&counts[which]<3)
                             samples[which][counts[which]++]=Double.parseDouble(match.group(1));
                     }
                 }
-                report.append("\\nBalanced comparison summary (median of up to 3 independent runs):");
+                report.append("\nBalanced comparison summary (median of up to 3 independent runs):");
                 for(int i=0;i<labels.length;i++){
                     if(counts[i]==3){
                         java.util.Arrays.sort(samples[i]);
                         double median=samples[i][1],spread=samples[i][2]-samples[i][0];
-                        report.append("\\n").append(labels[i]).append(": ").append(String.format(java.util.Locale.US,
+                        report.append("\n").append(labels[i]).append(": ").append(String.format(java.util.Locale.US,
                             "median %.3f ms; range %.3f–%.3f ms; range/median %.1f%%",
                             median,samples[i][0],samples[i][2],100.0*spread/median));
                     }else{
-                        report.append("\\n").append(labels[i]).append(": incomplete (")
+                        report.append("\n").append(labels[i]).append(": incomplete (")
                               .append(counts[i]).append("/3 valid runs)");
                     }
                 }
-                report.append("\\nMethod: 3 Latin-square rounds; every kernel appears once in each position. ")
+                report.append("\nMethod: 3 Latin-square rounds; every kernel appears once in each position. ")
                       .append("Each run uses 32 warm-up and 11 measured submissions. GPU timestamps exclude setup. ")
                       .append("Synthetic weights only; this does not measure model latency or RTF.");
-            }catch(Exception|OutOfMemoryError e){report.append("\\nComparison failed: ").append(e);}
+            }catch(Exception|OutOfMemoryError e){report.append("\nComparison failed: ").append(e);}
             finally{
                 lastReport=report.toString();show(lastReport);done();
             }
