@@ -60,7 +60,7 @@ def capture(directory,features,output):
               "source_model_sha256":hashlib.sha256((d/"decoder.source-projections.onnx").read_bytes()).hexdigest(),
               "calibration":"same real Mandarin fixture; feasibility only",
               "license":"Meta SeamlessStreaming CC BY-NC 4.0"}
-        np.savez(out/(label+".npz"),x=x,w=w,y=y)
+        np.savez(out/(label+".npz"),x=x,w=w,y=y,source_y=original_y)
         (out/(label+".json")).write_text(json.dumps(meta,indent=2)+"\n")
         print(json.dumps(meta),flush=True)
 
