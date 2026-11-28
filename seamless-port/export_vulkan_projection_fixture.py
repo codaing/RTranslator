@@ -96,9 +96,14 @@ def _constant_array(name, initializers, producers, base_dir, cache=None):
         return cache[name]
     tensor = initializers.get(name)
     if tensor is not None:
-        if tensor.data_location == T.EXTERNAL and not tensor.raw_data:
+        if tensor.data_location == T.EXTERNAL:
+            # Materialize the sidecar into raw_data, then clear the EXTERNAL
+            # marker. numpy_helper.to_array() otherwise attempts a second
+            # external-data read without base_dir, even after the bytes load.
             tensor = copy.deepcopy(tensor)
             load_external_data_for_tensor(tensor, str(Path(base_dir).resolve()))
+            tensor.ClearField("external_data")
+            tensor.data_location = T.DEFAULT
         value = nh.to_array(tensor)
     else:
         node = producers.get(name)
