@@ -11,6 +11,8 @@ on:
       - 'seamless-port/build_vulkan_probe.sh'
       - 'seamless/src/main/java/nie/translator/seamless/VulkanProbe.java'
       - 'seamless/src/main/java/nie/translator/seamless/MainActivity.java'
+      - 'seamless/src/androidTest/java/nie/translator/seamless/RuntimeTest.java'
+      - 'seamless-port/android_test.sh'
   workflow_dispatch:
 permissions:
   contents: read
