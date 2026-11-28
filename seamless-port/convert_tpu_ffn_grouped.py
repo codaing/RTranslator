@@ -151,7 +151,11 @@ def convert(source,output):
             row["status"]="FAIL";row["error"]=str(exc)
         reports.append(row);print(json.dumps(row),flush=True)
         (out/"manifest.json").write_text(json.dumps(reports,indent=2)+"\n")
-    commands=["# From extracted artifact directory","adb shell mkdir -p /data/local/tmp/seamless-tpu","adb push . /data/local/tmp/seamless-tpu/"]
+    app_out="/sdcard/Android/data/org.tensorflow.lite.benchmark/files"
+    commands=["# From extracted artifact directory",
+        "adb shell mkdir -p /data/local/tmp/seamless-tpu",
+        f"adb shell mkdir -p {app_out}",
+        "adb push . /data/local/tmp/seamless-tpu/"]
     for row in reports:
         if row["status"]!="CONVERTED":continue
         name=row["variant"];shape=",".join(map(str,row["input_shape"]))
@@ -160,11 +164,18 @@ def convert(source,output):
                 "--num_threads=4 --warmup_runs=10 --num_runs=100")
         for backend,flags in (("tpu","--use_nnapi=true --nnapi_accelerator_name=google-edgetpu --disable_nnapi_cpu=true --use_xnnpack=false --require_full_delegation=true"),
                               ("cpu","--use_nnapi=false --use_xnnpack=true")):
-            output_path=f"/data/local/tmp/seamless-tpu/{name}-{backend}-output.bin"
+            # BenchmarkModelActivity runs as the app UID, not shell. Save to
+            # its app-specific external files directory; /data/local/tmp is
+            # commonly not writable by an ordinary app process.
+            output_path=f"{app_out}/{name}-{backend}-output.bin"
+            expected_bytes=int(row["rows"])*1024
             commands.extend(["",f"# {name} / {backend}","adb logcat -c",
                 f"""adb shell am start -S -n org.tensorflow.lite.benchmark/.BenchmarkModelActivity --es args '"{common} {flags} --output_filepath={output_path}"'""",
-                "# Wait for final Inference timings and output file creation.",
-                "sleep 30",f"adb logcat -d -s tflite ExecutionPlan Darwinn > {name}-{backend}.log",
+                "# Wait up to 120 seconds for the Activity to finish and write the raw output.",
+                f"""for i in $(seq 1 120); do if adb shell test -s "{output_path}"; then break; fi; sleep 1; done""",
+                f"adb logcat -d -s tflite_BenchmarkModelActivity tflite ExecutionPlan Darwinn > {name}-{backend}.log",
+                f"""adb shell test -s "{output_path}" || {{ echo "ERROR: benchmark output was not created; inspect {name}-{backend}.log"; exit 1; }}""",
+                f"""bytes=$(adb shell wc -c < "{output_path}" | tr -d '\\r '); test "$bytes" = "{expected_bytes}" || {{ echo "ERROR: expected {expected_bytes} output bytes, got $bytes"; exit 1; }}""",
                 f"adb pull {output_path} {name}-{backend}-output.bin"])
     (out/"BENCHMARK-COMMANDS.txt").write_text("\n".join(commands)+"\n")
     (out/"README.txt").write_text("Two real dependent FFN projections. Final output projection is split into 32 independently quantized 32-channel outputs to reduce per-tensor output quantization error. One shared expansion convolution; 32 contraction convolutions. Reconstruct FP32 output by dequantizing each output tensor and concatenating groups in order. Same-recording calibration/evaluation only; not held-out speech or full-layer quality. Require full TPU delegation and compare actual output tensors on device. Do not deploy. CC BY-NC 4.0.\n")
