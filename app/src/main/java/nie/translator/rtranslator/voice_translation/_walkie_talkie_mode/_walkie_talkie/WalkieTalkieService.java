@@ -354,18 +354,18 @@ public class WalkieTalkieService extends VoiceTranslationService {
 
                 } else if (manualRecognizingSecondLanguage) {
                     // we start the speech recognition in only the second language
-                    speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, secondLanguage.getCode());
+                    speechRecognizer.recognize(data, ((Global) getApplication()).getSpeechBeamSize(), secondLanguage.getCode());
 
                 }else if(manualRecognizingAutoLanguage){
                     // we start the speech recognition in both languages
-                    speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode(), secondLanguage.getCode());
+                    speechRecognizer.recognize(data, ((Global) getApplication()).getSpeechBeamSize(), firstLanguage.getCode(), secondLanguage.getCode());
 
                 }else if(isMicAutomatic) {
                     if (headsetListening()) {
                         mainHandler.post(() -> enqueueHeadsetAudio(data));
                     } else {
                         // we start the speech recognition in both languages
-                        speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode(), secondLanguage.getCode());
+                        speechRecognizer.recognize(data, ((Global) getApplication()).getSpeechBeamSize(), firstLanguage.getCode(), secondLanguage.getCode());
                     }
                 }
             }
