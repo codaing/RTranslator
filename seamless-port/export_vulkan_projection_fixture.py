@@ -22,15 +22,15 @@ def sha256(data):
 
 
 def pack_fixture(activation, weight, reference):
-    """Pack X[M,K] FP32, W[N,K] FP16 output-major, with a 20-byte header."""
+    """Pack X[M,K] FP32 and W[K,N] FP16 in original ONNX layout."""
     x = np.ascontiguousarray(activation, dtype="<f4")
     w = np.ascontiguousarray(weight, dtype="<f2")
     y = np.ascontiguousarray(reference, dtype="<f4")
     if x.ndim != 2 or w.ndim != 2 or y.ndim != 2:
         raise ValueError("fixture arrays must be matrices")
     m, k = x.shape
-    n, wk = w.shape
-    if wk != n or y.shape != (m, n) or k % 2 or n % 4:
+    wk, n = w.shape
+    if wk != k or y.shape != (m, n) or k % 2 or n % 4:
         raise ValueError("incompatible projection dimensions")
     return HEADER.pack(MAGIC, 2, m, k, n) + x.tobytes() + w.tobytes()
 
