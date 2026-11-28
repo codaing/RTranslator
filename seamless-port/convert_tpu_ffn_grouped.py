@@ -160,10 +160,12 @@ def convert(source,output):
                 "--num_threads=4 --warmup_runs=10 --num_runs=100")
         for backend,flags in (("tpu","--use_nnapi=true --nnapi_accelerator_name=google-edgetpu --disable_nnapi_cpu=true --use_xnnpack=false --require_full_delegation=true"),
                               ("cpu","--use_nnapi=false --use_xnnpack=true")):
+            output_path=f"/data/local/tmp/seamless-tpu/{name}-{backend}-output.bin"
             commands.extend(["",f"# {name} / {backend}","adb logcat -c",
-                f"""adb shell am start -S -n org.tensorflow.lite.benchmark/.BenchmarkModelActivity --es args '"{common} {flags}"'""",
-                "# Wait for final Inference timings or an explicit delegate failure.",
-                "sleep 30",f"adb logcat -d -s tflite ExecutionPlan Darwinn > {name}-{backend}.log"])
+                f"""adb shell am start -S -n org.tensorflow.lite.benchmark/.BenchmarkModelActivity --es args '"{common} {flags} --output_filepath={output_path}"'""",
+                "# Wait for final Inference timings and output file creation.",
+                "sleep 30",f"adb logcat -d -s tflite ExecutionPlan Darwinn > {name}-{backend}.log",
+                f"adb pull {output_path} {name}-{backend}-output.bin"])
     (out/"BENCHMARK-COMMANDS.txt").write_text("\n".join(commands)+"\n")
     (out/"README.txt").write_text("Two real dependent FFN projections. Final output projection is split into 32 independently quantized 32-channel outputs to reduce per-tensor output quantization error. One shared expansion convolution; 32 contraction convolutions. Reconstruct FP32 output by dequantizing each output tensor and concatenating groups in order. Same-recording calibration/evaluation only; not held-out speech or full-layer quality. Require full TPU delegation and compare actual output tensors on device. Do not deploy. CC BY-NC 4.0.\n")
     if not all(r["status"]=="CONVERTED" for r in reports):raise RuntimeError("one or more grouped FFN models failed conversion")

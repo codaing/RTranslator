@@ -6,6 +6,7 @@ on:
       - '.github/workflows/seamless-tpu-ffn-groups.yml'
       - 'seamless-port/convert_tpu_ffn_grouped.py'
       - 'seamless-port/convert_tpu_bank.py'
+      - 'seamless-port/compare_tpu_ffn_outputs.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -33,6 +34,7 @@ jobs:
       - name: Convert grouped-output FFN models
         run: |
           TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_ffn_grouped.py tpu-capture tpu-benchmark
+          cp seamless-port/compare_tpu_ffn_outputs.py tpu-benchmark/
           cp tpu-capture/MODEL-LICENSE.txt tpu-benchmark/
       - uses: actions/upload-artifact@v4
         with:
