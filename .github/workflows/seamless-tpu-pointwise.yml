@@ -1,0 +1,37 @@
+name: Pixel TPU per-channel pointwise convolution probe
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-tpu-pointwise.yml'
+      - 'seamless-port/convert_tpu_pointwise.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  convert:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: tpu-real-projection-capture
+          run-id: '46124254640'
+          github-token: ${{ github.token }}
+          path: tpu-capture
+      - name: Install matching TensorFlow converter
+        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
+      - name: Convert and check equivalent pointwise convolution
+        run: |
+          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_pointwise.py tpu-capture tpu-benchmark
+          cp tpu-capture/MODEL-LICENSE.txt tpu-benchmark/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-real-weight-TFLite-pointwise-TPU-benchmark
+          path: tpu-benchmark/
+          retention-days: 7
