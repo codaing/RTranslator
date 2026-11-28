@@ -29,7 +29,7 @@ dependencies {
     } else {
         implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.30.0'
     // Experimental mixed FFN path: FP32 compact CPU first row + NNAPI Edge TPU INT8 tail.
-    implementation 'org.tensorflow:tensorflow-lite:2.19.1'
+    implementation 'org.tensorflow:tensorflow-lite:2.17.0'
     }
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.5.2'
