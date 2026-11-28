@@ -105,6 +105,10 @@
             android:layout="@layout/preference_seekbar"
             app:iconSpaceReserved="false" />
         <nie.translator.rtranslator.settings.SeekBarPreference
+            android:key="SpeechBeamSizeSetting"
+            android:layout="@layout/preference_seekbar"
+            app:iconSpaceReserved="false" />
+        <nie.translator.rtranslator.settings.SeekBarPreference
             android:key="SpeechTimeoutSetting"
             android:layout="@layout/preference_seekbar"
             app:iconSpaceReserved="false" />

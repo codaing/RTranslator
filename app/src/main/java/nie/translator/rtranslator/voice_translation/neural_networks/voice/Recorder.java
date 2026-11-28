@@ -71,7 +71,7 @@ public class Recorder {
     public static final int DEFAULT_AMPLITUDE_THRESHOLD = 1500; //old: 2000
     public static final int MIN_AMPLITUDE_THRESHOLD = 400;
     public static final int MAX_SPEECH_TIMEOUT_MILLIS = 5000;
-    public static final int DEFAULT_SPEECH_TIMEOUT_MILLIS = 1300; //original: 2000
+    public static final int DEFAULT_SPEECH_TIMEOUT_MILLIS = 700; // low-latency turn-taking default
     public static final int MIN_SPEECH_TIMEOUT_MILLIS = 100;
     public static final int MAX_PREV_VOICE_DURATION = 1800;
     public static final int DEFAULT_PREV_VOICE_DURATION = 1300;
@@ -621,6 +621,8 @@ public class Recorder {
         mLastVoiceHeardMillis = Long.MAX_VALUE;
         startVoiceIndex = 0;
 
+        Log.i("SpeechPipeline", "VOICE_SEGMENT audio_ms=" + (voiceLength * 1000L / sampleRate)
+                + " endpoint_timeout_ms=" + global.getSpeechTimeout());
         mCallback.onVoice(data, voiceLength);
         isRecording = false;
         mCallback.onVoiceEnd();

@@ -108,6 +108,10 @@ public class Global extends Application implements DefaultLifecycleObserver {
     private int speechTimeout = -1;
     private int prevVoiceDuration = -1;
     private int beamSize = -1;
+    private int speechBeamSize = -1;
+
+    public static final int DEFAULT_SPEECH_BEAM_SIZE = 1;
+    public static final int MAX_SPEECH_BEAM_SIZE = 4;
     private int amplitudeThreshold = Recorder.DEFAULT_AMPLITUDE_THRESHOLD;
     private boolean isForeground = false;
     @Nullable
@@ -949,6 +953,21 @@ public class Global extends Application implements DefaultLifecycleObserver {
         SharedPreferences.Editor editor = sharedPreferences.edit();
         editor.putInt("beamSize", value);
         editor.apply();
+    }
+
+    /** Lower ASR beam sizes reduce decoder work; 1 is the low-latency default. */
+    public int getSpeechBeamSize() {
+        if (speechBeamSize == -1) {
+            speechBeamSize = getSharedPreferences("default", Context.MODE_PRIVATE)
+                    .getInt("speechBeamSize", DEFAULT_SPEECH_BEAM_SIZE);
+        }
+        return Math.max(1, Math.min(MAX_SPEECH_BEAM_SIZE, speechBeamSize));
+    }
+
+    public void setSpeechBeamSize(int value) {
+        speechBeamSize = Math.max(1, Math.min(MAX_SPEECH_BEAM_SIZE, value));
+        getSharedPreferences("default", Context.MODE_PRIVATE).edit()
+                .putInt("speechBeamSize", speechBeamSize).apply();
     }
 
     public boolean isUseTatoeba(){

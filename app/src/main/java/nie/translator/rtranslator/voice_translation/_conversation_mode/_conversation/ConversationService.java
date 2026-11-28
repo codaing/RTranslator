@@ -47,7 +47,7 @@ import nie.translator.rtranslator.voice_translation.neural_networks.voice.Record
 
 public class ConversationService extends VoiceTranslationService {
     //properties
-    public static final int SPEECH_BEAM_SIZE = 4;
+    public static final int SPEECH_BEAM_SIZE = Global.DEFAULT_SPEECH_BEAM_SIZE;
     public static final int TRANSLATOR_BEAM_SIZE = 1;
 
     //commands
@@ -94,7 +94,7 @@ public class ConversationService extends VoiceTranslationService {
                     CustomLocale language = global.getLanguage(true);
                     int sampleRate = getVoiceRecorderSampleRate();
                     if (sampleRate != 0) {
-                        mVoiceRecognizer.recognize(data, SPEECH_BEAM_SIZE, language.getCode());
+                        mVoiceRecognizer.recognize(data, global.getSpeechBeamSize(), language.getCode());
                     }
                 }
             }

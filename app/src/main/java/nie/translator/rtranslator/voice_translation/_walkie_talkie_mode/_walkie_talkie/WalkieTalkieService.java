@@ -46,7 +46,7 @@ import nie.translator.rtranslator.voice_translation.neural_networks.voice.Record
 public class WalkieTalkieService extends VoiceTranslationService {
     private static final int TIME_BEFORE_REACTIVATING_TTS_AFTER_VOICE_END = 500;
     //properties
-    public static final int SPEECH_BEAM_SIZE = 1;
+    public static final int SPEECH_BEAM_SIZE = Global.DEFAULT_SPEECH_BEAM_SIZE;
     public static final int TRANSLATOR_BEAM_SIZE = 1;
 
     // commands
@@ -133,7 +133,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
         final float[] audio = pendingAudio.removeFirst();
         int sourceMode = ((Global) getApplication()).getHeadsetSourceMode();
         if (sourceMode == Global.HEADSET_SOURCE_AUTO) {
-            speechRecognizer.recognize(audio, SPEECH_BEAM_SIZE,
+            speechRecognizer.recognize(audio, ((Global) getApplication()).getSpeechBeamSize(),
                     firstLanguage.getCode(), secondLanguage.getCode());
             return;
         }
@@ -144,7 +144,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
         final Translator.TranslateListener listener = fromFirst
                 ? firstResultTranslateListener : secondResultTranslateListener;
 
-        speechRecognizer.recognizeFiltered(audio, SPEECH_BEAM_SIZE, source.getCode(),
+        speechRecognizer.recognizeFiltered(audio, ((Global) getApplication()).getSpeechBeamSize(), source.getCode(),
                 new RecognizerListener() {
                     @Override
                     public void onSpeechRecognizedResult(String text, String languageCode,
@@ -350,7 +350,7 @@ public class WalkieTalkieService extends VoiceTranslationService {
                 super.onVoice(data,size);
                 if(manualRecognizingFirstLanguage){
                     // we start the speech recognition in only the first language
-                    speechRecognizer.recognize(data, SPEECH_BEAM_SIZE, firstLanguage.getCode());
+                    speechRecognizer.recognize(data, ((Global) getApplication()).getSpeechBeamSize(), firstLanguage.getCode());
 
                 } else if (manualRecognizingSecondLanguage) {
                     // we start the speech recognition in only the second language

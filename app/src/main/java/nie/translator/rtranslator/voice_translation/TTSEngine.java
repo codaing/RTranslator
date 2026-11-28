@@ -26,6 +26,7 @@ public class TTSEngine {
     private final TTS tts;
     private boolean pause = false;
     private Context context;
+    private long utteranceStartedAtMs = 0;
     @Nullable
     private TTSEngineListener listener;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -40,6 +41,10 @@ public class TTSEngine {
                     TTSEngine.this.tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                         @Override
                         public void onDone(String utteranceId) {
+                            long durationMs = utteranceStartedAtMs > 0
+                                    ? android.os.SystemClock.elapsedRealtime() - utteranceStartedAtMs : -1;
+                            Log.i("SpeechPipeline", "TTS_DONE id=" + utteranceId + " duration_ms=" + durationMs);
+                            utteranceStartedAtMs = 0;
                             if (listener != null) {
                                 boolean isLast = messageQueue.isEmpty();
                                 listener.onUtteranceFinished(getExecutingMessage(), isLast);
@@ -55,7 +60,8 @@ public class TTSEngine {
 
                         @Override
                         public void onStart(String utteranceId) {
-
+                            utteranceStartedAtMs = android.os.SystemClock.elapsedRealtime();
+                            Log.i("SpeechPipeline", "TTS_START id=" + utteranceId);
                         }
 
                         @Override

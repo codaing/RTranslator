@@ -798,7 +798,9 @@ public class Translator extends NeuralNetworkApi {
                     isDictionaryResult = true;
                 }
             }
-            android.util.Log.i("performance", "TRANSLATION DONE IN: " + (System.currentTimeMillis() - initTime) + "ms");
+            android.util.Log.i("SpeechPipeline", "MT_DONE elapsed_ms="
+                    + (System.currentTimeMillis() - initTime) + " input_chars=" + textToTranslate.length()
+                    + " beam=" + beamSize + " model_mode=" + performMode);
             if (saveResults) {
                 lastOutputText = new GuiMessage(new Message(global, finalResult), inputLanguage, outputLanguage, currentResultID, false, true);
             }

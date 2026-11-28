@@ -41,6 +41,7 @@ public class SeekBarPreference extends Preference {
     public static final int SPEECH_TIMEOUT_MODE = 1;
     public static final int PREV_VOICE_DURATION_MODE = 2;
     public static final int BEAM_SIZE_MODE = 3;
+    public static final int SPEECH_BEAM_SIZE_MODE = 4;
     private int mode;
     private float defaultValue = 50;
     private Slider slider;
@@ -89,6 +90,7 @@ public class SeekBarPreference extends Preference {
                         value.setText(String.format(Locale.US, "%.2f s", seekBarValue));
                         break;
                     case BEAM_SIZE_MODE:
+                    case SPEECH_BEAM_SIZE_MODE:
                         value.setText(String.format(Locale.US, "%d", (int) seekBarValue));
                         break;
                 }
@@ -160,6 +162,14 @@ public class SeekBarPreference extends Preference {
                     title.setText(R.string.preference_title_beam_size);
                     summary.setText(R.string.preference_description_beam_size);
                     break;
+                case SPEECH_BEAM_SIZE_MODE:
+                    defaultValue = Global.DEFAULT_SPEECH_BEAM_SIZE;
+                    slider.setStepSize(1);
+                    slider.setValueFrom(1);
+                    slider.setValueTo(Global.MAX_SPEECH_BEAM_SIZE);
+                    title.setText(R.string.preference_title_speech_beam_size);
+                    summary.setText(R.string.preference_description_speech_beam_size);
+                    break;
             }
 
             setSeekBarValue();
@@ -191,6 +201,11 @@ public class SeekBarPreference extends Preference {
                 slider.setValue(value);
             }
             break;
+
+            case SPEECH_BEAM_SIZE_MODE: {
+                slider.setValue(global.getSpeechBeamSize());
+            }
+            break;
         }
     }
 
@@ -209,6 +224,9 @@ public class SeekBarPreference extends Preference {
                     break;
                 case BEAM_SIZE_MODE:
                     global.setBeamSize(Integer.parseInt(value.getText().toString()));
+                    break;
+                case SPEECH_BEAM_SIZE_MODE:
+                    global.setSpeechBeamSize(Integer.parseInt(value.getText().toString()));
                     break;
             }
         }
