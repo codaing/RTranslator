@@ -59,14 +59,21 @@ def convert(source, dest):
     y = np.concatenate([c[3] for c in cases], axis=0)
     # Only calibration calls select channels; neither target nor other
     # diagnostic calls influence ranking. Stable sort makes ties deterministic.
-    h_train = np.maximum(x[train] @ w1 + b1, 0)
+    pre_train = x[train] @ w1 + b1
+    h_train = np.maximum(pre_train, 0)
     score = np.max(h_train, axis=0) * np.linalg.norm(w2, axis=1)
-    ranking = np.argsort(-score, kind="stable")
+    # Pad with inactive channels nearest to their activation boundary, not
+    # arbitrary zero-score ties. All ranking inputs come from calibration.
+    weight_norm = np.maximum(np.linalg.norm(w1, axis=0), 1e-12)
+    margin_score = np.max(pre_train / weight_norm, axis=0)
+    ranking = np.lexsort((np.arange(len(score)), -margin_score, -score))
+    pre_all = x @ w1 + b1
     report = {
         "source_graph_sha256": plan["source_graph_sha256"],
         "calibration_cases": [cases[i][0] for i in train],
         "evaluation_case": cases[test][0],
         "active_calibration_channels": int(np.count_nonzero(score)),
+        "ranking": "active_contribution_then_normalized_preactivation_margin",
         "fixed_eval_group_size": 32,
         "threshold": 0.05,
         "same_recording_only": True,
@@ -76,6 +83,13 @@ def convert(source, dest):
     (dest / "first-row.source-reference.bin").write_bytes(y[test].astype("<f4").tobytes())
     for k in WIDTHS:
         ids = np.sort(ranking[:k])
+        omitted = np.ones(8192, dtype=bool)
+        omitted[ids] = False
+        # Real-arithmetic L2 certificate: every omitted preactivation
+        # remains negative if distance from a calibration anchor is less
+        # than its minimum normalized negative margin. Reserve a small
+        # safety margin; this is a diagnostic, not a deployed guard.
+        radii = np.maximum(0, np.min(-pre_train[:, omitted] / weight_norm[omitted], axis=1) - 1e-4)
         f1 = np.ascontiguousarray(w1[:, ids].reshape(1, 1, 1024, k))
         f2 = np.ascontiguousarray(w2[ids, :].reshape(1, 1, k, 1024))
         bias1 = np.ascontiguousarray(b1[ids])
@@ -108,6 +122,8 @@ def convert(source, dest):
             metric = evaluate(y[i:i+1], actual)
             per_case.append({"case": case[0], "rows": case[1],
                              "role": "calibration" if i in train else "evaluation" if i == test else "same_recording_diagnostic",
+                             "omitted_active_channels": int(np.count_nonzero(pre_all[i, omitted] > 0)),
+                             "l2_inactive_certificate": bool(np.any(np.linalg.norm(x[i] - x[train], axis=1) < radii)),
                              **metric})
             if i == test:
                 (dest / (name + ".host-output.bin")).write_bytes(actual.astype("<f4").tobytes())
@@ -115,6 +131,8 @@ def convert(source, dest):
         worst_group = max(v["max_fixed32_nrms"] for v in per_case)
         result = {"variant": name, "hidden_channels": k, "model_bytes": len(blob),
                   "ops": ops, "selected_indices": ids.tolist(), "per_case": per_case,
+                  "anchor_radii_l2": radii.tolist(),
+                  "max_omitted_active_channels": max(v["omitted_active_channels"] for v in per_case),
                   "evaluation": per_case[test], "worst_nrms": worst_nrms,
                   "worst_fixed32_nrms": worst_group,
                   "precision_screen_pass": worst_nrms < 0.05 and worst_group < 0.05}
