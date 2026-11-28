@@ -133,7 +133,7 @@ def convert(source, output):
             ):
                 commands.extend([
                     f"# {name} / {backend}", "adb logcat -c",
-                    f"adb shell am start -S -n org.tensorflow.lite.benchmark/.BenchmarkModelActivity --es args '\\"{common} {flags}\\"'",
+                    f"""adb shell am start -S -n org.tensorflow.lite.benchmark/.BenchmarkModelActivity --es args '"{common} {flags}"'""",
                     "# Wait for compile and all measured iterations before retrieving logs.",
                     "sleep 20", f"adb logcat -d > {name}-{backend.lower()}.log",
                 ])
