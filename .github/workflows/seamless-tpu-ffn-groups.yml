@@ -7,6 +7,8 @@ on:
       - 'seamless-port/convert_tpu_ffn_grouped.py'
       - 'seamless-port/convert_tpu_bank.py'
       - 'seamless-port/compare_tpu_ffn_outputs.py'
+      - 'seamless-port/aggregate_tpu_ffn_split.py'
+      - 'seamless-port/test_tpu_ffn_grouped.py'
   workflow_dispatch:
 permissions:
   contents: read
