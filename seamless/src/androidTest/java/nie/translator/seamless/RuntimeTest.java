@@ -64,7 +64,18 @@ public class RuntimeTest {
         assertTrue(GpuTuning.DECODER.uses(DecoderCache.SOURCE));
         assertTrue(GpuTuning.DECODER.uses(DecoderCache.STEP));
         assertFalse(GpuTuning.DECODER.uses("encoder.int8.onnx"));
+        android.content.Context target=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        GpuTuning.probe(target,false);
+        android.util.Log.i("WebGpuProbe","FP32_GPU_ONLY_PASS");
+        try{
+            GpuTuning.probe(target,true);
+        }catch(ai.onnxruntime.OrtException e){
+            if(!GpuTuning.missingShaderF16(e))throw e;
+            android.util.Log.i("WebGpuProbe","FP16_CHAIN_NOT_TESTED: shader-f16 explicitly unsupported by device");
+            return;
+        }
         chain("test-projected-pack.zip",true,false,GpuTuning.DECODER);
+        android.util.Log.i("WebGpuProbe","FP16_CHAIN_PASS");
     }
     private void chain(String pack,boolean cached,boolean quiet)throws Exception{
         chain(pack,cached,quiet,GpuTuning.CPU);

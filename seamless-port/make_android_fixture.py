@@ -29,6 +29,23 @@ xnn_model.ir_version=9
 onnx.checker.check_model(xnn_model)
 onnx.save(xnn_model,out/"test-xnnpack-matmul.onnx")
 
+# Small production diagnostic, generated as part of the GitHub Actions build.
+# Float32 input/output make validation independent of Java half conversion.
+# The dynamic Cast and MatMul exercise shader-f16, not just provider registration.
+probe_dir=Path("seamless/src/main/assets")
+probe_dir.mkdir(parents=True,exist_ok=True)
+onnx.save(xnn_model,probe_dir/"webgpu-fp32-probe.onnx")
+half_graph=h.make_graph([
+    h.make_node("Cast",["x"],["half_x"],to=T.FLOAT16),
+    h.make_node("MatMul",["half_x","half_weight"],["half_y"]),
+    h.make_node("Cast",["half_y"],["y"],to=T.FLOAT)],
+    "webgpu_fp16_probe",[h.make_tensor_value_info("x",T.FLOAT,[1,16])],
+    [h.make_tensor_value_info("y",T.FLOAT,[1,16])],
+    [numpy_helper.from_array(np.eye(16,dtype=np.float16)*np.float16(2),name="half_weight")])
+half_model=h.make_model(half_graph,opset_imports=[h.make_opsetid("",17)],ir_version=9)
+onnx.checker.check_model(half_model)
+onnx.save(half_model,probe_dir/"webgpu-fp16-probe.onnx")
+
 # Four-model deterministic integration fixture. These are tiny non-speech
 # graphs: they exercise the same file names, tensor interfaces, streaming
 # policy, external data and Java session chain as the real model pack.

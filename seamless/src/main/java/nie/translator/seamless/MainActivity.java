@@ -15,7 +15,7 @@ import java.util.concurrent.*;
 public final class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private TextView status;
-    private Button start,load,stop,benchmark,copyReport;
+    private Button start,load,stop,benchmark,copyReport,probeGpu;
     private CheckBox rollover, xnnpack, nnapi, quietCpu;
     private Spinner gpuProfile;
     private volatile LiveAudio live;
@@ -37,6 +37,8 @@ public final class MainActivity extends Activity {
         ArrayAdapter<GpuTuning> gpuAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,GpuTuning.values());
         gpuAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         gpuProfile.setAdapter(gpuAdapter);gpuProfile.setSelection(0);panel.addView(gpuProfile);
+        probeGpu=new Button(this);probeGpu.setText("Test WebGPU FP32 / FP16 (no model needed)");panel.addView(probeGpu);
+        probeGpu.setOnClickListener(v->runGpuProbe());
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
         benchmark=new Button(this);benchmark.setText("Benchmark local 16 kHz mono PCM WAV");panel.addView(benchmark);
@@ -54,7 +56,7 @@ public final class MainActivity extends Activity {
         stop.setOnClickListener(v->stopLive());
         ScrollView scroll=new ScrollView(this);scroll.addView(panel);setContentView(scroll);buttons();
     }
-    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);gpuProfile.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);gpuProfile.setEnabled(!busy);probeGpu.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
     private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
     private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -90,6 +92,24 @@ public final class MainActivity extends Activity {
             finally{live=null;done();}
         });
     }
+    private void runGpuProbe(){
+        if(busy)return;
+        busy=true;stopRequested=false;lastReport=null;buttons();show("Testing GPU-only matrix multiplication…");
+        worker.execute(()->{
+            StringBuilder report=new StringBuilder("WebGPU capability probe (CPU fallback disabled)\nDevice "+android.os.Build.MODEL);
+            try{
+                GpuTuning.probe(this,false);report.append("\nFP32: PASS");
+                try{GpuTuning.probe(this,true);report.append("\nFP16: PASS");}
+                catch(ai.onnxruntime.OrtException e){
+                    report.append(GpuTuning.missingShaderF16(e)?"\nFP16: shader-f16 unsupported":"\nFP16: FAILED");
+                    report.append("\n").append(e.getMessage());
+                }
+            }catch(Exception|OutOfMemoryError e){report.append("\nProbe failed: ").append(e);}
+            finally{
+                lastReport=report.toString();show(lastReport);done();
+            }
+        });
+    }
     private void runBenchmark(Uri uri){
         final boolean useXnnpack=xnnpack.isChecked(),useNnapi=nnapi.isChecked(),useQuiet=quietCpu.isChecked();
         final GpuTuning gpu=(GpuTuning)gpuProfile.getSelectedItem();
@@ -97,6 +117,11 @@ public final class MainActivity extends Activity {
         worker.execute(()->{
             try(InputStream in=getContentResolver().openInputStream(uri)){
                 if(in==null)throw new IOException("Cannot open WAV");
+                if(gpu!=GpuTuning.CPU){
+                    show("Checking GPU capability before loading model weights…");
+                    GpuTuning.probe(this,false);
+                    if(gpu.needsFp16Probe())GpuTuning.probe(this,true);
+                }
                 lastReport=OfflineBenchmark.run(modelDir(),in,()->stopRequested||closed,this::show,
                     useXnnpack,useNnapi,useQuiet,gpu);
                 show(lastReport);
