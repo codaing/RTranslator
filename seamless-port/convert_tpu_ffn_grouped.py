@@ -607,6 +607,7 @@ def convert(
                     f"if adb shell test -s {output_path}; then break; fi; "
                     "sleep 1; done"
                 ),
+                "sleep 20",
                (
                     "adb logcat -d -s tflite_BenchmarkModelActivity "
                     f"tflite ExecutionPlan Darwinn > {name}-{backend}.log"
@@ -679,6 +680,7 @@ def convert(
                 f"if adb shell test -s {output_path}; then break; fi; "
                 "sleep 1; done"
             ),
+            "sleep 20",
             (
                 "adb logcat -d -s tflite_BenchmarkModelActivity "
                 f"tflite ExecutionPlan Darwinn > {name}-fp32-cpu.log"

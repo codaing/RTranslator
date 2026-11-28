@@ -121,3 +121,14 @@ These mixed metrics are from NumPy/host-side reconstruction, not yet from an And
 ## Source-check architecture guard (2026-11-28)
 
 The dynamic INT8 FFN synthetic parity test retains its strict NRMS <2.5% assertion on ARM64, where the native ARM64 case passed. The same test is a known rejected x86 case (NRMS 10.868%); x86 CI now explicitly skips that architecture-specific parity assertion rather than weakening its threshold. This does not make the x86 experiment pass and does not promote the rejected dynamic-FFN path.
+
+
+## TFLite FP32 first-row model and mixed split host audit (2026-11-28)
+
+The new M=1 FP32 TFLite model converted successfully: 67,147,116 bytes, exactly two CONV_2D operations, input/output shape [1,1,1,1024]. Its CI-host TFLite interpreter output has NRMS 0.5505% against the original FP16 source, maximum row NRMS 0.5505%, and maximum fixed-32-channel group NRMS 0.7788%.
+
+The mixed host TFLite reassembly (FP32 M=1 first row on CPU + INT8 M=31 tail with group size 64) was executed through aggregate_tpu_ffn_split.py using the actual TFLite interpreter outputs. It reports global NRMS 0.7057%, maximum row NRMS 4.7265%, maximum fixed-32-channel group NRMS 4.3779%, and passes the preliminary 5% global/row/fixed-group screen. This is a host numerical result, not a Pixel 9a measurement.
+
+A compact Pixel benchmark bundle was prepared with only the M=32 INT8 baseline, M=31 INT8 g64 tail, and M=1 FP32 CPU model. Its command file runs five 100-run device benchmarks (M=32 CPU/TPU, M=31 CPU/TPU, M=1 FP32 CPU), waits 20 seconds before collecting each log, requires full TPU delegation, compares physical CPU/TPU raw bytes exactly for the INT8 graphs, and reassembles the mixed output. The live APK remains unchanged.
+
+Separately, ARM64 CI reran the rejected dynamic-FFN experiment. Its graph-level test passed on ARM64, but full speech had no eligible candidate: the all-INT8 profile had token edit distance 13, decision and duration mismatches, and only a 2.5% processing improvement (processing RTF 2.876 versus baseline 2.950), below the 5% speed gate. Do not promote that dynamic-FFN path.
