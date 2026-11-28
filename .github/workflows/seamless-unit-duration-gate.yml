@@ -7,6 +7,7 @@ on:
       - 'seamless-port/compare_unit_durations.py'
       - 'seamless-port/split_unit_durations.py'
       - 'seamless-port/test_unit_durations.py'
+      - 'seamless-port/speech_smoke.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -24,6 +25,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Validate partition and threshold logic before downloading weights
+        run: |
+          python -m pip install 'numpy==1.26.4' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+          python -m unittest discover -s seamless-port -p test_unit_durations.py
       - uses: actions/download-artifact@v4
         with:
           name: Seamless-projected-FP16-model-pack-EXPERIMENTAL
@@ -49,9 +54,7 @@ jobs:
           sha256sum speech-input/fbank.bin
       - name: Extract duration-only graph and compare full speech pipeline
         run: |
-          python -m pip install 'numpy==1.26.4' 'onnxruntime==1.30.0' 'onnx==1.20.1'
           mkdir -p reports
-          python -m unittest discover -s seamless-port -p test_unit_durations.py
           set -o pipefail
           python -u seamless-port/split_unit_durations.py models | tee reports/partition.log
           python -u seamless-port/compare_unit_durations.py models speech-input/fbank.bin reports
