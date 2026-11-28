@@ -152,7 +152,7 @@ def _candidate_nodes(model):
         if len(shape) != 2 or dtype != T.FLOAT16:
             continue
         k, n = shape
-        if k < 32 or n < 4 or k % 2 or n % 4 or k > 8192 or n > 8192:
+        if k < 32 or n < 4 or k % 2 or n % 4 or k > 8192 or n > 8192 or k * n > 8 * 1024 * 1024:
             continue
         if activation_name in initializers:
             continue
@@ -285,6 +285,8 @@ def export(directory, fbank_path, output_dir):
                 "ort_version": ort.__version__,
                 "source_fp16_output_vs_fp32_reference_nrms": source_fp16_nrms,
                 "fixture_sha256": sha256(blob),
+                "activation_sha256": sha256(x.astype("<f4", copy=False).tobytes()),
+                "weight_output_major_sha256": sha256(np.ascontiguousarray(weight.T, dtype="<f2").tobytes()),
                 "reference_model_sha256": sha256(reference_path.read_bytes()),
                 "fixture_bytes": header["bytes"],
                 "license": "Meta SeamlessStreaming CC BY-NC 4.0; noncommercial use only",

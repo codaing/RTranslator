@@ -297,13 +297,13 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
         }
         if(realProjection){
             auto words=static_cast<uint32_t*>(r.mapped);
-            double sumError=0.0,sumReference=0.0,maxAbs=0.0,maxReference=0.0;
+            double sumError=0.0,sumReference=0.0,maxAbs=0.0;
             for(uint32_t i=0;i<cCount;i++){
                 float got;std::memcpy(&got,words+aCount+bCount+i,4);
                 if(!std::isfinite(got))throw std::runtime_error("non-finite real-model projection output at index "+std::to_string(i));
                 double diff=double(got)-cpuExpected[i];
                 sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
-                maxAbs=std::max(maxAbs,std::abs(diff));maxReference=std::max(maxReference,std::abs(double(cpuExpected[i])));
+                maxAbs=std::max(maxAbs,std::abs(diff));
             }
             const double nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
             if(nrms>0.002||maxAbs>0.01)
