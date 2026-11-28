@@ -163,3 +163,6 @@ The diagnostic APK now optionally requests XNNPACK for FP32 UnitY2/vocoder stage
 ## Real-weight Vulkan projection parity experiment
 
 A dedicated experimental APK can embed one FP16 MatMul weight matrix and a representative activation captured from the actual Mandarin encoder plus incremental decoder source-projection graph. The APK runs an isolated FP32 ONNX Runtime CPU reference on-device, then runs the same MxK by KxN projection through a native Vulkan fused-4 shader using the exact FP16 model weights. Every output is compared; the report includes CPU ORT time, GPU timestamp, queue/fence latency, host fixture-copy time and Vulkan setup time. This is a single real model projection experiment, not full decoder acceleration, not an end-to-end translation benchmark, and not a validated production provider. The extracted Meta weights are CC BY-NC 4.0 and noncommercial only; the attribution/license file is included in the APK assets.
+
+
+The real-projection fixture keeps the weight matrix in its original ONNX MatMul layout. The Android native path measures the FP16 transpose/packing into output-major Vulkan storage separately from activation copy and pipeline/device setup; this makes the one-time packing cost visible rather than hiding it in CI fixture generation.

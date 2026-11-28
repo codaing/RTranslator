@@ -11,6 +11,7 @@ class ProjectionFixtureTest(unittest.TestCase):
         blob = pack_fixture(x, w, y)
         self.assertEqual(parse_fixture_header(blob), {"M": 3, "K": 8, "N": 12, "bytes": len(blob)})
         self.assertEqual(blob[:4], b"SVP1")
+        self.assertEqual(int.from_bytes(blob[4:8], "little"), 2)
         self.assertEqual(len(blob), 20 + x.size * 4 + w.size * 2)
 
     def test_rejects_bad_dimensions(self):

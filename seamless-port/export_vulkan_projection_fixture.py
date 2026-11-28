@@ -24,22 +24,22 @@ def sha256(data):
 def pack_fixture(activation, weight, reference):
     """Pack X[M,K] FP32, W[N,K] FP16 output-major, with a 20-byte header."""
     x = np.ascontiguousarray(activation, dtype="<f4")
-    w = np.ascontiguousarray(weight.T, dtype="<f2")
+    w = np.ascontiguousarray(weight, dtype="<f2")
     y = np.ascontiguousarray(reference, dtype="<f4")
     if x.ndim != 2 or w.ndim != 2 or y.ndim != 2:
         raise ValueError("fixture arrays must be matrices")
     m, k = x.shape
     n, wk = w.shape
-    if wk != k or y.shape != (m, n) or k % 2 or n % 4:
+    if wk != n or y.shape != (m, n) or k % 2 or n % 4:
         raise ValueError("incompatible projection dimensions")
-    return HEADER.pack(MAGIC, 1, m, k, n) + x.tobytes() + w.tobytes()
+    return HEADER.pack(MAGIC, 2, m, k, n) + x.tobytes() + w.tobytes()
 
 
 def parse_fixture_header(data):
     if len(data) < HEADER.size:
         raise ValueError("truncated projection fixture")
     magic, version, m, k, n = HEADER.unpack_from(data)
-    if magic != MAGIC or version != 1:
+    if magic != MAGIC or version != 2:
         raise ValueError("unsupported projection fixture")
     expected = HEADER.size + m * k * 4 + n * k * 2
     if len(data) != expected:
@@ -281,12 +281,13 @@ def export(directory, fbank_path, output_dir):
                 "weight_dtype": str(weight.dtype),
                 "source_node_output_dtype": str(original_output.dtype),
                 "M": m, "K": k, "N": n,
-                "layout": "X[M,K] FP32; W[N,K] FP16 output-major; Y[M,N] FP32",
+                "layout": "X[M,K] FP32; W[K,N] FP16 in original ONNX MatMul layout; Y[M,N] FP32; Android packs W to output-major before dispatch",
                 "reference": "isolated ONNX Runtime CPUExecutionProvider FP32 MatMul using exact FP16 model weights promoted to FP32",
                 "ort_version": ort.__version__,
                 "source_fp16_output_vs_fp32_reference_nrms": source_fp16_nrms,
                 "fixture_sha256": sha256(blob),
                 "activation_sha256": sha256(x.astype("<f4", copy=False).tobytes()),
+                "weight_model_layout_sha256": sha256(np.ascontiguousarray(weight, dtype="<f2").tobytes()),
                 "weight_output_major_sha256": sha256(np.ascontiguousarray(weight.T, dtype="<f2").tobytes()),
                 "reference_model_sha256": sha256(reference_path.read_bytes()),
                 "fixture_bytes": header["bytes"],

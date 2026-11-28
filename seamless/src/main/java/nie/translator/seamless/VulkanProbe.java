@@ -41,7 +41,7 @@ final class VulkanProbe {
             byte[] model=readAsset(context,"projection-reference.onnx");
             String metadata=new String(readAsset(context,"vulkan-real-projection.json"),"UTF-8");
             ByteBuffer header=ByteBuffer.wrap(fixture).order(ByteOrder.LITTLE_ENDIAN);
-            if(fixture.length<20||header.getInt()!=0x31505653||header.getInt()!=1)
+            if(fixture.length<20||header.getInt()!=0x31505653||header.getInt()!=2)
                 throw new IOException("invalid real-projection fixture header");
             int m=header.getInt(),k=header.getInt(),n=header.getInt();
             long expectedBytes=20L+(long)m*k*4L+(long)n*k*2L;

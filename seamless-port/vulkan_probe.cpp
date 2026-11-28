@@ -87,7 +87,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
             uint64_t inputBytes=uint64_t(fixtureM)*fixtureK*4;
             uint64_t weightBytes=uint64_t(fixtureN)*fixtureK*2;
             uint64_t total=20+inputBytes+weightBytes;
-            if(version!=1||fixtureM<1||fixtureM>2048||fixtureK<2||fixtureK>8192||(fixtureK&1)||
+            if(version!=2||fixtureM<1||fixtureM>2048||fixtureK<2||fixtureK>8192||(fixtureK&1)||
                fixtureN<4||fixtureN>8192||fixtureN%4||total!=fixtureBytes.size())
                 throw std::runtime_error("invalid real-projection fixture dimensions or length");
             if(env->GetArrayLength(expectedArray)!=jsize(uint64_t(fixtureM)*fixtureN))
@@ -98,7 +98,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
             for(float value:cpuExpected)if(!std::isfinite(value))throw std::runtime_error("non-finite CPU reference output");
         }
         const auto setupStart=std::chrono::steady_clock::now();
-        double fixtureCopyMs=0.0;
+        double fixtureCopyMs=0.0,weightPackMs=0.0;
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="Seamless compute diagnostic";app.apiVersion=VK_API_VERSION_1_2;
         VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};ici.pApplicationInfo=&app;
         check(vkCreateInstance(&ici,nullptr,&r.instance),"vkCreateInstance");
@@ -176,12 +176,20 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
         const uint16_t halfBits[]={0x3400,0xb400,0x3800,0xb800};
         const float weights[]={.25f,-.25f,.5f,-.5f};
         if(realProjection){
-            auto copyStart=std::chrono::steady_clock::now();
             auto words=static_cast<uint32_t*>(r.mapped);
+            auto copyStart=std::chrono::steady_clock::now();
             std::memcpy(words,fixtureBytes.data()+20,size_t(aCount)*4);
-            std::memcpy(words+aCount,fixtureBytes.data()+20+size_t(aCount)*4,size_t(bCount)*4);
-            std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
             fixtureCopyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-copyStart).count();
+            auto packStart=std::chrono::steady_clock::now();
+            const uint8_t* sourceWeights=fixtureBytes.data()+20+size_t(aCount)*4;
+            for(uint32_t n=0;n<N;n++)for(uint32_t k=0;k<K;k+=2){
+                uint16_t lo=0,hi=0;
+                std::memcpy(&lo,sourceWeights+(size_t(k)*N+n)*2,2);
+                std::memcpy(&hi,sourceWeights+(size_t(k+1)*N+n)*2,2);
+                words[aCount+(size_t(n)*K+k)/2]=uint32_t(lo)|(uint32_t(hi)<<16);
+            }
+            weightPackMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-packStart).count();
+            std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
         }else if(rows){
             auto words=static_cast<uint32_t*>(r.mapped);
             for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t k=0;k<K;k++){
@@ -360,7 +368,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
                <<" | median queue+fence "<<wallMedian/1000.0<<" ms"
                <<" | GPU us/dispatch "<<(gpuUs.empty()?0:gpuMedian)
                <<" | "<<(2.0*rows*K*N/std::max(1.0,kernelUs)/1000.0)<<" GFLOP/s"
-               <<" | fixture copy "<<fixtureCopyMs<<" ms | setup "<<setupMs<<" ms"
+               <<" | activation copy "<<fixtureCopyMs<<" ms | FP16 weight pack+mapped write "<<weightPackMs<<" ms | setup "<<setupMs<<" ms"
                <<" | 32 warmups, 11 measured submissions; setup excluded from GPU median";
         }else if(rows){
             double wallMedian=wallUs[wallUs.size()/2];
