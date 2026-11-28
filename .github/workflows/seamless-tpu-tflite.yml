@@ -1,0 +1,88 @@
+name: Pixel TPU real-weight TFLite projection bank
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-tpu-tflite.yml'
+      - 'seamless-port/capture_tpu_bank.py'
+      - 'seamless-port/convert_tpu_bank.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: tpu-tflite-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  capture:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-projected-FP16-model-pack-EXPERIMENTAL
+          path: base-artifact
+          run-id: '46083582838'
+          github-token: ${{ github.token }}
+      - name: Extract unchanged validated source-projected model
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-projected-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models speech-reports
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install matching CPU runtime and prepare same Mandarin fixture
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install 'numpy==1.26.4' 'onnx==1.20.1' 'onnxruntime==1.30.0' 'sympy==1.14.0'
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          sha256sum speech-input/fbank.bin
+      - name: Capture actual decoder projection bank
+        run: |
+          python -u seamless-port/capture_tpu_bank.py models speech-input/fbank.bin tpu-capture
+          cp models/MODEL-LICENSE.txt tpu-capture/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tpu-real-projection-capture
+          path: tpu-capture/
+          compression-level: 0
+          retention-days: 1
+  convert:
+    needs: capture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: tpu-real-projection-capture
+          path: tpu-capture
+      - name: Install TensorFlow converter
+        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
+      - name: Convert real weights and validate CPU output
+        run: |
+          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_bank.py tpu-capture tpu-benchmark
+          cp tpu-capture/MODEL-LICENSE.txt tpu-benchmark/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Seamless-real-weight-TFLite-TPU-benchmark
+          path: tpu-benchmark/
+          retention-days: 7
