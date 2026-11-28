@@ -15,7 +15,7 @@ import java.util.concurrent.*;
 public final class MainActivity extends Activity {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private TextView status;
-    private Button start,load,stop,benchmark,copyReport,probeGpu;
+    private Button start,load,stop,benchmark,copyReport,probeGpu,compareGpu;
     private CheckBox rollover, xnnpack, nnapi, quietCpu;
     private Spinner gpuProfile;
     private volatile LiveAudio live;
@@ -39,6 +39,8 @@ public final class MainActivity extends Activity {
         gpuProfile.setAdapter(gpuAdapter);gpuProfile.setSelection(0);panel.addView(gpuProfile);
         probeGpu=new Button(this);probeGpu.setText("Test native Vulkan kernels (no model needed)");panel.addView(probeGpu);
         probeGpu.setOnClickListener(v->runGpuProbe());
+        compareGpu=new Button(this);compareGpu.setText("Compare top Vulkan kernels (balanced A/B)");panel.addView(compareGpu);
+        compareGpu.setOnClickListener(v->runGpuComparison());
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
         benchmark=new Button(this);benchmark.setText("Benchmark local 16 kHz mono PCM WAV");panel.addView(benchmark);
@@ -56,7 +58,7 @@ public final class MainActivity extends Activity {
         stop.setOnClickListener(v->stopLive());
         ScrollView scroll=new ScrollView(this);scroll.addView(panel);setContentView(scroll);buttons();
     }
-    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);gpuProfile.setEnabled(!busy);probeGpu.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
+    private void buttons(){load.setEnabled(!busy);start.setEnabled(!busy&&ModelPack.present(modelDir()));stop.setEnabled(busy);rollover.setEnabled(!busy);xnnpack.setEnabled(!busy);nnapi.setEnabled(!busy);quietCpu.setEnabled(!busy);gpuProfile.setEnabled(!busy);probeGpu.setEnabled(!busy);compareGpu.setEnabled(!busy);benchmark.setEnabled(!busy&&ModelPack.present(modelDir()));copyReport.setEnabled(!busy&&lastReport!=null);}
     private void show(String s){runOnUiThread(()->{if(!closed)status.setText(s);});}
     private void done(){runOnUiThread(()->{busy=false;if(!closed)buttons();});}
     @Override protected void onActivityResult(int request,int result,Intent data){
@@ -108,6 +110,56 @@ public final class MainActivity extends Activity {
                 for(int o:new int[]{4,8,16})if(!stopRequested)report.append("\n").append(VulkanProbe.fused(o));
                 report.append("\nWebGPU retry deferred: repeated Pixel readback timeout.");
             }catch(Exception|OutOfMemoryError e){report.append("\nProbe failed: ").append(e);}
+            finally{
+                lastReport=report.toString();show(lastReport);done();
+            }
+        });
+    }
+    private void runGpuComparison(){
+        if(busy)return;
+        busy=true;stopRequested=false;lastReport=null;buttons();
+        show("Running balanced Vulkan kernel comparison…");
+        worker.execute(()->{
+            StringBuilder report=new StringBuilder("Balanced Vulkan kernel comparison (synthetic; no CPU fallback)\\nDevice "+android.os.Build.MODEL);
+            try{
+                report.append("\\nAndroid ").append(android.os.Build.VERSION.RELEASE)
+                      .append(" | SDK ").append(android.os.Build.VERSION.SDK_INT);
+                String[] labels={"subgroup-reduction","output-major","fused-4"};
+                // A 3x3 Latin-square schedule places each candidate in every
+                // run position once, reducing systematic first/last-order bias.
+                int[][] schedule={{0,1,2},{1,2,0},{2,0,1}};
+                double[][] samples=new double[3][3];
+                int[] counts=new int[3];
+                java.util.regex.Pattern timing=java.util.regex.Pattern.compile("median GPU ([0-9.]+) ms");
+                for(int round=0;round<schedule.length&&!stopRequested;round++){
+                    for(int slot=0;slot<3&&!stopRequested;slot++){
+                        int which=schedule[round][slot];
+                        String result=which==0?VulkanProbe.subgroup():
+                            which==1?VulkanProbe.gemv(1):VulkanProbe.fused(4);
+                        report.append("\\nRound ").append(round+1).append(" position ").append(slot+1)
+                              .append(" [").append(labels[which]).append("]: ").append(result);
+                        java.util.regex.Matcher match=timing.matcher(result);
+                        if(match.find()&&counts[which]<3)
+                            samples[which][counts[which]++]=Double.parseDouble(match.group(1));
+                    }
+                }
+                report.append("\\nBalanced comparison summary (median of up to 3 independent runs):");
+                for(int i=0;i<labels.length;i++){
+                    if(counts[i]==3){
+                        java.util.Arrays.sort(samples[i]);
+                        double median=samples[i][1],spread=samples[i][2]-samples[i][0];
+                        report.append("\\n").append(labels[i]).append(": ").append(String.format(java.util.Locale.US,
+                            "median %.3f ms; range %.3f–%.3f ms; range/median %.1f%%",
+                            median,samples[i][0],samples[i][2],100.0*spread/median));
+                    }else{
+                        report.append("\\n").append(labels[i]).append(": incomplete (")
+                              .append(counts[i]).append("/3 valid runs)");
+                    }
+                }
+                report.append("\\nMethod: 3 Latin-square rounds; every kernel appears once in each position. ")
+                      .append("Each run uses 32 warm-up and 11 measured submissions. GPU timestamps exclude setup. ")
+                      .append("Synthetic weights only; this does not measure model latency or RTF.");
+            }catch(Exception|OutOfMemoryError e){report.append("\\nComparison failed: ").append(e);}
             finally{
                 lastReport=report.toString();show(lastReport);done();
             }
