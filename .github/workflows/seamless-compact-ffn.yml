@@ -1,0 +1,41 @@
+name: Compact FP32 first-row FFN probe
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-compact-ffn.yml'
+      - 'seamless-port/convert_compact_ffn.py'
+      - 'seamless-port/audit_compact_ffn.py'
+      - 'seamless-port/benchmark_compact_ffn.sh'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  compact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: tpu-real-ffn-capture
+          path: tpu-capture
+          run-id: '46126098483'
+          github-token: ${{ github.token }}
+      - name: Install converter
+        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
+      - name: Convert and verify compact FFNs
+        run: |
+          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_compact_ffn.py tpu-capture compact-benchmark
+          cp seamless-port/audit_compact_ffn.py seamless-port/benchmark_compact_ffn.sh compact-benchmark/
+          bash -n compact-benchmark/benchmark_compact_ffn.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Pixel9a-compact-first-row-FFN
+          path: compact-benchmark/
+          retention-days: 7
