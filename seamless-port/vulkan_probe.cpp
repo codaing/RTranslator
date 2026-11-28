@@ -254,15 +254,25 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
                 float f;std::memcpy(&f,words+aCount+bCount+i,4);
                 if(!std::isfinite(f))throw std::runtime_error("unwritten or nonfinite matrix output");
             }
-            // The synthetic weight pattern depends only on k%4 and n%4.
-            // Compute four reference dot products per row, then compare every
-            // output. This remains outside the timed submissions.
-            float expected[32][4]{};
-            for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t residue=0;residue<4;residue++)
-                for(uint32_t k=0;k<K;k++)expected[m][residue]+=av(m,k)*weights[wi(k,residue)];
+            // wi(k,n) depends on n*7 mod 4 and (k*n) mod 19.
+            // Therefore the complete weight pattern repeats every lcm(4,19)=76
+            // output columns, not every four columns. Build an exact CPU
+            // reference for one 76-column period per row, then validate every
+            // GPU output. This work is deliberately outside the timed submits.
+            constexpr uint32_t outputPeriod=76;
+            float expected[32][outputPeriod]{};
+            for(uint32_t m=0;m<uint32_t(rows);m++)
+                for(uint32_t residue=0;residue<outputPeriod;residue++)
+                    for(uint32_t k=0;k<K;k++)
+                        expected[m][residue]+=av(m,k)*weights[wi(k,residue)];
             for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t n=0;n<N;n++){
                 float got;std::memcpy(&got,words+aCount+bCount+m*N+n,4);
-                if(std::abs(got-expected[m][n&3u])>1e-4f)throw std::runtime_error("matrix readback mismatch");
+                const float want=expected[m][n%outputPeriod];
+                if(std::abs(got-want)>1e-4f){
+                    throw std::runtime_error("matrix readback mismatch at row="+std::to_string(m)+
+                        " col="+std::to_string(n)+" got="+std::to_string(got)+
+                        " expected="+std::to_string(want));
+                }
             }
         }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
         std::sort(wallUs.begin(),wallUs.end());
