@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
+from scipy.optimize import linear_sum_assignment
 from convert_tpu_bank import metrics
 
 GROUP=32
@@ -112,24 +113,42 @@ def convert(source,output):
             if s<=0:raise ValueError("invalid input quantization")
             data=np.clip(np.rint(reshape(x)/s)+z,-128,127).astype(np.int8)
             interp.set_tensor(inp["index"],data);interp.invoke()
-            parts=[];out_q=[]
+            parts=[];out_q=[];raw_parts=[];out_names=[]
             for d in outs:
                 raw=interp.get_tensor(d["index"]);so,zo=d["quantization"]
                 parts.append(((raw.astype(np.float32)-zo)*so).reshape(m,GROUP))
+                raw_parts.append(raw.tobytes())
                 out_q.append([float(so),int(zo)])
-            actual=np.concatenate(parts,axis=1)
+                out_names.append(d["name"])
+            # TFLite may reorder multi-output tensors relative to the Python
+            # tuple returned by the traced function. Determine the static
+            # tensor-to-channel-group mapping against the captured FP16 output.
+            cost=np.empty((len(parts),1024//GROUP),dtype=np.float64)
+            for i,part in enumerate(parts):
+                for j in range(1024//GROUP):
+                    ref=y[:,j*GROUP:(j+1)*GROUP]
+                    cost[i,j]=np.linalg.norm(part-ref)/max(np.linalg.norm(ref),1e-12)
+            tensor_idx,group_idx=linear_sum_assignment(cost)
+            group_to_tensor=[-1]*(1024//GROUP)
+            for i,j in zip(tensor_idx,group_idx):group_to_tensor[int(j)]=int(i)
+            if any(i<0 for i in group_to_tensor) or len(set(group_to_tensor))!=len(parts):
+                raise ValueError("could not establish unique TFLite output ordering")
+            actual=np.concatenate([parts[i] for i in group_to_tensor],axis=1)
+            group_nrms=[float(cost[group_to_tensor[j],j]) for j in range(1024//GROUP)]
             err=metrics(y,actual)
             row.update(status="CONVERTED",model_bytes=len(blob),input_shape=inp["shape"].tolist(),
                 output_shapes=[o["shape"].tolist() for o in outs],
                 input_name=inp["name"],input_quantization=list(inp["quantization"]),
-                output_quantizations=out_q,filter_scale_counts=scales,ops=[op["op_name"] for op in ops],
+                output_names=out_names,output_quantizations=out_q,
+                output_group_to_tensor_index=group_to_tensor,output_group_nrms=group_nrms,
+                filter_scale_counts=scales,ops=[op["op_name"] for op in ops],
                 nrms=err["nrms"],max_abs=err["max_abs"],precision_screen_pass=err["nrms"]<.05)
             (out/(name+".tflite")).write_bytes(blob)
             (out/(name+".input.bin")).write_bytes(data.tobytes())
-            (out/(name+".cpu-output.bin")).write_bytes(np.concatenate([
-                interp.get_tensor(d["index"]).tobytes() for d in outs]))
+            (out/(name+".cpu-output.bin")).write_bytes(b"".join(raw_parts))
             (out/(name+".source-reference.bin")).write_bytes(y.astype("<f4").tobytes())
-        except Exception as exc:row["error"]=str(exc)
+        except Exception as exc:
+            row["status"]="FAIL";row["error"]=str(exc)
         reports.append(row);print(json.dumps(row),flush=True)
         (out/"manifest.json").write_text(json.dumps(reports,indent=2)+"\n")
     commands=["# From extracted artifact directory","adb shell mkdir -p /data/local/tmp/seamless-tpu","adb push . /data/local/tmp/seamless-tpu/"]
