@@ -7,6 +7,7 @@ group sizes on the M=31 tail. No production integration is performed here.
 """
 import argparse
 import json
+import shlex
 from pathlib import Path
 
 import numpy as np
@@ -289,14 +290,28 @@ def _convert_variant(
         if any(item["dtype"] != np.int8 for item in output_details):
             raise ValueError("group model output is not INT8")
 
-        expansion_ops = [
-            operation for operation in operations
-            if tensor_details[int(operation["outputs"][0])]["shape"].tolist()
-            == [1, 1, rows, 8192]
-        ]
-        if len(expansion_ops) != 1:
-            raise ValueError("could not identify unique 8192-channel expansion output")
-        expansion_tensor_index = int(expansion_ops[0]["outputs"][0])
+        # Inspect the actual tensor consumed by the contraction Conv2D. This
+        # is the post-bias/post-ReLU 8192-channel activation, not the earlier
+        # expansion MatMul output (which has the same shape).
+        contraction_ops = []
+        for operation in operations:
+            if operation["op_name"] != "CONV_2D":
+                continue
+            input_index, filter_index = map(int, operation["inputs"][:2])
+            input_shape = tensor_details[input_index]["shape"].tolist()
+            filter_shape = tensor_details[filter_index]["shape"].tolist()
+            if (
+                input_shape == [1, 1, rows, 8192]
+                and filter_shape[1:] == [1, 1, 8192]
+                and filter_shape[0] == group_size
+            ):
+                contraction_ops.append(operation)
+        if len(contraction_ops) != output_groups:
+            raise ValueError(
+                f"expected {output_groups} grouped contraction Conv2D ops, "
+                f"found {len(contraction_ops)}"
+            )
+        expansion_tensor_index = int(contraction_ops[0]["inputs"][0])
 
         input_scale, input_zero = input_detail["quantization"]
         if input_scale <= 0:
@@ -481,7 +496,10 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
             f"--input_layer_value_files=activation:/data/local/tmp/seamless-tpu/"
             f"{name}.input.bin --num_threads=4 --warmup_runs=10 --num_runs=100"
         )
+        # Run XNNPACK first so the TPU comparison can use the matching
+        # physical-device CPU output, rather than the CI-host reference.
         for backend, flags in (
+            ("cpu", "--use_nnapi=false --use_xnnpack=true"),
             (
                 "tpu",
                 "--use_nnapi=true "
@@ -489,7 +507,6 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
                 "--disable_nnapi_cpu=true --use_xnnpack=false "
                 "--require_full_delegation=true",
             ),
-            ("cpu", "--use_nnapi=false --use_xnnpack=true"),
         ):
             output_path = f"{app_output}/{name}-{backend}-output.bin"
             expected_bytes = int(report["rows"]) * CHANNELS
@@ -501,8 +518,10 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
                 (
                     "adb shell am start -S -n "
                     "org.tensorflow.lite.benchmark/.BenchmarkModelActivity "
-                    f"--es args '\\"{common} {flags} "
-                    f"--output_filepath={output_path}\\"'"
+                    "--es args "
+                    + shlex.quote(
+                        f'"{common} {flags} --output_filepath={output_path}"'
+                    )
                 ),
                 "# Wait up to 180 seconds for the Activity to write raw output.",
                 (
@@ -531,11 +550,27 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
                     f"python compare_tpu_ffn_outputs.py manifest.json {name} "
                     f"{name}-{backend}-output.bin"
                     + (
-                        " --require-exact-backend-parity"
+                        f" --host-output {name}-cpu-output.bin "
+                        "--require-exact-backend-parity"
                         if backend == "tpu" else ""
                     )
                     + " || echo 'Precision/parity gate failed; retain metrics "
                     f"and continue: {name}/{backend}'"
+                ),
+            ])
+
+    # Reassemble the split first-row + tail result and compare with
+    # the single M=32 baseline for each physical backend.
+    for backend in ("cpu", "tpu"):
+        for group_size in tail_group_sizes:
+            commands.extend([
+                "",
+                f"# Reassembled M=1 + M=31 split / {backend} / tail group {group_size}",
+                (
+                    "python aggregate_tpu_ffn_split.py manifest.json "
+                    f"--backend {backend} --tail-group-size {group_size} "
+                    f"--output SPLIT-ACCURACY-{backend}-g{group_size}.json"
+                    " || echo 'Split accuracy audit failed; inspect the JSON/logs'"
                 ),
             ])
 

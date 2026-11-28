@@ -78,3 +78,12 @@ The original FP32 expansion reference computed from the captured weights and act
 A simplified simulation using only expansion-activation and final-output quantization (not quantized weights or input) gives M=32 tail-row median NRMS about 19.93%; separating the first row and calibrating the M=31 tail independently reduces the simulated tail median to about 1.51% (p90 about 1.96%). This is a hypothesis screen, not a TFLite conversion result. The next physical-device experiment therefore compares one M=32 baseline against a separate M=1 first-row model plus M=31 tail models, with tail output groups of 8, 16, 32, and 64 channels.
 
 The updated converter records global, per-row, and per-output-group NRMS independently, and captures the quantized expansion intermediate. Accuracy acceptance requires all three error levels below 5%; global NRMS alone is insufficient. Physical testing must also retain full google-edgetpu delegation, exact CPU/TPU raw-output parity, and latency accounting for the two-call split. Calibration/evaluation still use one Mandarin recording; held-out speech, complete decoder quality, and end-to-end RTF remain unproven. No APK or live inference path changes are made by this experiment.
+
+
+## Row-split CI correction and physical-device comparison integrity (2026-11-28)
+
+The first row-split CI attempt (run 46133049584) failed before conversion because the generated adb am start --es args command had an unterminated Python string. The source-check run 46133048928 failed at compileall for the same syntax error. No TFLite conversion or Pixel benchmark occurred in those runs.
+
+The follow-up corrects command quoting with shlex.quote, identifies the post-bias/post-ReLU expansion activation by tracing the input consumed by the grouped contraction Conv2D operations (rather than selecting an ambiguous tensor by shape), and runs physical XNNPACK before TPU. TPU output comparison now explicitly uses the matching on-device XNNPACK raw output file as --host-output, so exact backend parity is not accidentally checked against the CI-host reference tensor.
+
+A new aggregation script reassembles M=1 first-row and M=31 tail outputs, compares the reassembled 32-row result against the same M=32 source reference, and reports global, per-row, and segment-specific output-group error. These are still experimental screens using the same speech recording, not held-out speech or end-to-end translation quality.
