@@ -1,0 +1,67 @@
+name: Native ARM64 speed-first combined profiles
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-speed-first.yml'
+      - 'seamless-port/compare_fast_profiles.py'
+      - 'seamless-port/prefill_reuse.py'
+      - 'seamless-port/test_prefill_reuse.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  comparison:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Validate partition and threshold logic before downloading weights
+        run: |
+          python -m pip install 'numpy==1.26.4' 'onnxruntime==1.30.0' 'onnx==1.20.1'
+          python -m unittest discover -s seamless-port -p test_unit_durations.py
+          python -m unittest discover -s seamless-port -p test_prefill_reuse.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-projected-FP16-model-pack-EXPERIMENTAL
+          path: base-artifact
+          run-id: '46083582838'
+          github-token: ${{ github.token }}
+      - name: Extract validated projected decoder package
+        run: |
+          set -euo pipefail
+          mkdir -p models
+          INNER=$(find base-artifact -name 'seamless-projected-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+      - name: Prepare identical Mandarin speech fixture
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          sha256sum speech-input/fbank.bin
+      - name: Compare combined encoder, decoder prefill and duration-gate speed profiles
+        run: |
+          mkdir -p reports
+          set -o pipefail
+          python -u seamless-port/split_unit_durations.py models | tee reports/partition.log
+          python -u seamless-port/compare_fast_profiles.py models speech-input/fbank.bin reports
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Seamless-speed-first-diagnostics
+          path: reports/
+          if-no-files-found: warn
+          retention-days: 7

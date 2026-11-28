@@ -59,7 +59,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0,unit_duration_gate=False):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0,unit_duration_gate=False,prefill_tail=0):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -125,8 +125,20 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
         raise ValueError("update_frames must be a multiple of 32 between 32 and 160")
     if encoder_window not in (0,384,768,1152):
         raise ValueError("unsupported encoder context experiment")
-    if encoder_window and update_frames!=64:
-        raise ValueError("encoder window experiment requires 64-frame cadence")
+    if encoder_window and update_frames%16:
+        raise ValueError("encoder window requires aligned cadence")
+    if encoder_window and encoder_window<=128+update_frames:
+        raise ValueError("insufficient overlap")
+    if prefill_tail not in (0,1,4,8):
+        raise ValueError("unsupported prefill reuse experiment")
+    if prefill_tail and not incremental:
+        raise ValueError("prefill reuse requires incremental decoder")
+    from prefill_reuse import retained_prefix, retain_state
+    saved_caches=None
+    saved_features=None
+    saved_tokens=None
+    reused_prefill_tokens=0
+    prefill_tokens=0
     from probe_encoder_context import splice
     encoder_history=None
     previous_count=0
@@ -162,10 +174,20 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
                 projected=dict(zip(names,projection.run(names,{"encoded":encoded})))
                 phase_totals["source_projection_seconds"]+=time.monotonic()-t_proj
             state=IncrementalDecoder(dec,decoder_meta,encoded,projected)
-            tok,p,initial_features=incremental_predict(state,tokens,0)
+            # Experimental approximation: upper decoder layers depend on
+            # older encoder outputs. Never represent this as exact reuse.
+            # Rebuild at EOF and always recompute at least the last tail tokens.
+            cut=retained_prefix(tokens,saved_tokens,prefill_tail,finished)
+            if cut:
+                state.caches,feature_rows=retain_state(saved_caches,saved_features,cut)
+                reused_prefill_tokens+=cut
+            else:
+                feature_rows=[]
+            prefill_tokens+=len(tokens)-cut
+            tok,p,initial_features=incremental_predict(state,tokens[cut:],cut)
             decisions.append({"source_frames":count,"prefix_tokens":len(tokens),"token":tok,"p_choose":p,
                 "encoded_sha256":hashlib.sha256(encoded.tobytes()).hexdigest(),"encoded_rms":float(np.sqrt(np.mean(encoded**2)))})
-            feature_rows=[row for row in initial_features[0]]
+            feature_rows.extend(initial_features[0])
             for _ in range(50):
                 if tok==meta["eos"] or (not finished and p<0.5):break
                 if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
@@ -179,6 +201,11 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
                 if len(tokens)-2>=100:raise RuntimeError("100-token context limit")
                 tokens.append(tok)
 
+        if incremental and prefill_tail:
+            # Save the accepted prefix, NOT the synthetic synthesis comma.
+            saved_caches=state.caches
+            saved_features=tuple(feature_rows)
+            saved_tokens=tuple(tokens)
         if len(tokens)>3 and (len(tokens)>old or finished):
             ids=tokens+[meta["comma"]]
             chars,lengths=map_chars(ids,meta)
@@ -247,6 +274,7 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "encoder_window":encoder_window,"encoder_input_frames":encoder_frames,
        "unit_duration_gate":unit_duration_gate,"unit_calls":unit_calls,
+       "prefill_tail":prefill_tail,"prefill_tokens":prefill_tokens,"reused_prefill_tokens":reused_prefill_tokens,
        "duration_gate_calls":duration_gate_calls,"unit_calls_skipped":unit_calls_skipped,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
@@ -263,4 +291,5 @@ if __name__=="__main__":
     p.add_argument("--threads",type=int,default=4)
     p.add_argument("--encoder-window",type=int,default=0,choices=(0,384,768,1152))
     p.add_argument("--unit-duration-gate",action="store_true")
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window,a.unit_duration_gate)
+    p.add_argument("--prefill-tail",type=int,choices=(0,1,4,8),default=0)
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window,a.unit_duration_gate,a.prefill_tail)
