@@ -6,6 +6,7 @@ on:
       - '.github/workflows/seamless-vulkan-real-projection.yml'
       - 'seamless-port/export_vulkan_projection_fixture.py'
       - 'seamless-port/test_export_vulkan_projection_fixture.py'
+      # Rebuild the real-model APK whenever a projection kernel changes.
       - 'seamless-port/vulkan_real_projection.comp'
       - 'seamless-port/vulkan_real_projection_multirow.comp'
       - 'seamless-port/vulkan_real_projection_subgroup16.comp'
