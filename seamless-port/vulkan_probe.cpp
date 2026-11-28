@@ -200,7 +200,9 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};check(vkCreateFence(r.device,&fi,nullptr,&r.fence),"fence");
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&cmd;
         std::vector<double> wallUs,gpuUs;
-        const int warmupSubmissions=rows?std::max(1,(32+dispatches-1)/dispatches):1;
+        // The tiny diagnostic multiplies its buffer in place. Submit it exactly once;
+        // repeating the command would multiply by four and fail the 2x assertion.
+        const int warmupSubmissions=rows?std::max(1,(32+dispatches-1)/dispatches):0;
         const int measuredSubmissions=rows?11:1;
         if(rows){
             auto words=static_cast<uint32_t*>(r.mapped);
