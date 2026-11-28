@@ -262,6 +262,10 @@ final class MixedFfnBenchmark {
         }
     }
 
+    private static ByteBuffer allocateInput(int bytes) {
+        return ByteBuffer.allocateDirect(bytes).order(ByteOrder.nativeOrder());
+    }
+
     private static TailBuffers allocateTailBuffers(Interpreter interpreter) {
         int count = interpreter.getOutputTensorCount();
         if (count != GROUPS) throw new IllegalStateException("expected 16 tail output tensors, got " + count);
