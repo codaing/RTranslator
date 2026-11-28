@@ -1,0 +1,66 @@
+name: Native ARM64 calibrated encoder INT8 convolution speech gate
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-encoder-conv-int8.yml'
+      - 'seamless-port/encoder_conv_int8.py'
+      - 'seamless-port/test_encoder_conv_int8.py'
+      - 'seamless-port/compare_encoder_conv_int8.py'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: encoder-conv-int8-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  speech-gate:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Seamless-projected-FP16-model-pack-EXPERIMENTAL
+          path: base-artifact
+          run-id: '46083582838'
+          github-token: ${{ github.token }}
+      - name: Extract unchanged validated source-projected model
+        run: |
+          set -euo pipefail
+          INNER=$(find base-artifact -name 'seamless-projected-fp16-experimental.zip' -print -quit)
+          test -n "$INNER"
+          mkdir -p models speech-reports
+          unzip -q "$INNER" -d models
+          rm -rf base-artifact
+          df -h .
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install matching CPU runtime and prepare same Mandarin fixture
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          python -m pip install 'numpy==1.26.4' 'onnx==1.20.1' 'onnxruntime==1.30.0' 'sympy==1.14.0'
+          python seamless-port/audio_fixture.py speech-input
+          mkdir -p java-out
+          javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
+          java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
+          sha256sum speech-input/fbank.bin
+      - name: Verify both quantized convolution formats in native ORT
+        run: python -m unittest discover -s seamless-port -p test_encoder_conv_int8.py
+      - name: Compare real speech with full encoder context and three Conv profiles
+        run: python -u seamless-port/compare_encoder_conv_int8.py models speech-input/fbank.bin speech-reports
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Seamless-encoder-conv-int8-speech-reports
+          path: speech-reports/
+          if-no-files-found: warn
+          retention-days: 7
