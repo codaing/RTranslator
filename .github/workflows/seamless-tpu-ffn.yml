@@ -7,6 +7,7 @@ on:
       - 'seamless-port/capture_tpu_ffn.py'
       - 'seamless-port/convert_tpu_ffn.py'
       - 'seamless-port/convert_tpu_bank.py'
+      - 'seamless-port/export_vulkan_projection_fixture.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -53,6 +54,23 @@ jobs:
           javac -d java-out seamless/src/main/java/nie/translator/seamless/StreamingFbank.java seamless-port/FbankCli.java
           java -cp java-out FbankCli speech-input/mandarin.pcm speech-input/fbank.bin
           sha256sum speech-input/fbank.bin
+      - name: Verify model external-data sidecars
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          import onnx
+          d=Path("models")
+          print("model files:", [(p.name,p.stat().st_size) for p in d.iterdir() if p.is_file() and ("decoder" in p.name or p.name=="sha256.json")])
+          for name in ("decoder.incremental.fp16.onnx","decoder.cached-step.onnx"):
+              p=d/name
+              if not p.exists(): continue
+              m=onnx.load(str(p),load_external_data=False)
+              refs=set()
+              for t in m.graph.initializer:
+                  refs.update(e.value for e in t.external_data if e.key=="location")
+              print(name, "external files:", [(x,(d/x).exists()) for x in sorted(refs)])
+          PY
       - name: Capture actual dependent FFN operations from speech inference
         run: |
           python -u seamless-port/capture_tpu_ffn.py models speech-input/fbank.bin tpu-capture
