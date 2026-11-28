@@ -23,7 +23,12 @@ android {
     }
 }
 dependencies {
-    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.30.0'
+    // Optional CI-only GPU build; ordinary APKs retain pinned Maven runtime.
+    if (project.hasProperty('seamlessOrtAar')) {
+        implementation files(project.property('seamlessOrtAar'))
+    } else {
+        implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.30.0'
+    }
     testImplementation 'junit:junit:4.13.2'
     androidTestImplementation 'androidx.test:runner:1.5.2'
     androidTestImplementation 'androidx.test.ext:junit:1.1.5'

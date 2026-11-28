@@ -1,0 +1,88 @@
+name: Experimental Android Vulkan WebGPU runtime build
+on:
+  push:
+    branches: [seamless-streaming]
+    paths:
+      - '.github/workflows/seamless-webgpu-runtime.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: seamless-webgpu-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android-arm64:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      ORT_TAG: v1.30.0
+      NDK_VERSION: 28.2.13676358
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare pinned Android build prerequisites
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/gpu-reports"
+          sudo apt-get update
+          sudo apt-get install -y ninja-build
+          python -m pip install 'cmake==3.31.6' packaging numpy
+          sdkmanager "ndk;${NDK_VERSION}" "platforms;android-36" "build-tools;36.0.0"
+          df -h .
+          free -h
+      - name: Fetch matching upstream ORT source
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "$ORT_TAG" https://github.com/microsoft/onnxruntime.git ort-source
+          git -C ort-source rev-parse HEAD | tee gpu-reports/ort-source-sha.txt
+          cd ort-source
+          git submodule update --init --recursive --depth 1
+          python tools/ci_build/build.py --help > ../gpu-reports/build-help.txt
+          grep -q -- '--use_webgpu' ../gpu-reports/build-help.txt
+          grep -q -- '--build_java' ../gpu-reports/build-help.txt
+      - name: Cross-compile full runtime with native WebGPU and Java bindings
+        run: |
+          set -euo pipefail
+          cd ort-source
+          ./build.sh --config Release --build_dir "$GITHUB_WORKSPACE/ort-build" \
+            --android --android_sdk_path "$ANDROID_HOME" \
+            --android_ndk_path "$ANDROID_HOME/ndk/$NDK_VERSION" \
+            --android_abi arm64-v8a --android_api 28 --cmake_generator Ninja \
+            --build_shared_lib --build_java --use_webgpu static_lib \
+            --skip_tests --parallel 2 2>&1 | tee ../gpu-reports/build.log
+      - name: Inspect GPU runtime AAR and build compatibility APK
+        run: |
+          set -euo pipefail
+          mkdir -p gpu-runtime
+          AAR=$(find ort-build -type f -name '*.aar' ! -name '*debug*' | head -n 1)
+          test -n "$AAR"
+          cp "$AAR" gpu-runtime/onnxruntime-webgpu-arm64.aar
+          unzip -l gpu-runtime/onnxruntime-webgpu-arm64.aar | tee gpu-reports/aar-contents.txt
+          grep -q 'jni/arm64-v8a/libonnxruntime.so' gpu-reports/aar-contents.txt
+          unzip -p gpu-runtime/onnxruntime-webgpu-arm64.aar classes.jar > gpu-runtime/classes.jar
+          javap -classpath gpu-runtime/classes.jar 'ai.onnxruntime.OrtSession$SessionOptions' > gpu-reports/java-api.txt
+          grep -q addWebGPU gpu-reports/java-api.txt
+          rm gpu-runtime/classes.jar
+          chmod +x gradlew
+          ./gradlew :seamless:assembleDebug -PseamlessOrtAar="$GITHUB_WORKSPACE/gpu-runtime/onnxruntime-webgpu-arm64.aar" --no-daemon 2>&1 | tee gpu-reports/app-build.log
+          sha256sum gpu-runtime/*.aar > gpu-reports/sha256.txt
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: Seamless-WebGPU-Android-runtime-BUILD-ONLY
+          path: gpu-runtime/*.aar
+          compression-level: 0
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Seamless-WebGPU-build-diagnostics
+          path: gpu-reports/
+          if-no-files-found: warn
+          retention-days: 7
