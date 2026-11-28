@@ -1,0 +1,39 @@
+#version 450
+// Actual-model projection: X[M,K] FP32, W[N,K] output-major FP16,
+// Y[M,N] FP32. One workgroup computes four output channels for one row.
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(push_constant) uniform Params { uint K; uint N; uint M; } params;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+shared float partial[4][32];
+void main(){
+    uint K=params.K, N=params.N, M=params.M;
+    uint row=gl_WorkGroupID.y;
+    uint first=gl_WorkGroupID.x*4u;
+    uint lane=gl_LocalInvocationID.x;
+    if(row>=M || first+3u>=N)return;
+    float accum[4];
+    for(uint o=0u;o<4u;o++)accum[o]=0.0;
+    uint activationBase=row*K;
+    uint weightBase=M*K;
+    for(uint p=lane;p<K/2u;p+=32u){
+        vec2 a=vec2(uintBitsToFloat(data.v[activationBase+2u*p]),
+                    uintBitsToFloat(data.v[activationBase+2u*p+1u]));
+        for(uint o=0u;o<4u;o++){
+            uint base=weightBase+(first+o)*(K/2u);
+            vec2 w=unpackHalf2x16(data.v[base+p]);
+            accum[o]+=dot(a,w);
+        }
+    }
+    for(uint o=0u;o<4u;o++)partial[o][lane]=accum[o];
+    barrier();
+    for(uint offset=16u;offset>0u;offset>>=1u){
+        if(lane<offset){
+            for(uint o=0u;o<4u;o++)partial[o][lane]+=partial[o][lane+offset];
+        }
+        barrier();
+    }
+    if(lane==0u){
+        uint outputBase=weightBase+K*N/2u+row*N+first;
+        for(uint o=0u;o<4u;o++)data.v[outputBase+o]=floatBitsToUint(partial[o][0]);
+    }
+}

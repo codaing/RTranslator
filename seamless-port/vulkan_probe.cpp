@@ -15,6 +15,7 @@
 #include "gemv_fused4_shader.h"
 #include "gemv_fused8_shader.h"
 #include "gemv_fused16_shader.h"
+#include "real_projection_shader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -61,11 +62,43 @@ struct Resources {
 std::atomic<bool> timedOut{false};
 }
 extern "C" JNIEXPORT jstring JNICALL
-Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode){
+Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,jbyteArray fixtureArray,jfloatArray expectedArray){
     std::ostringstream out;
     if(timedOut.load())return env->NewStringUTF("Direct Vulkan: previous queue failure; restart app before retry");
     Resources r;
     try{
+        const bool realProjection=mode==-300;
+        std::vector<uint8_t> fixtureBytes;
+        std::vector<float> cpuExpected;
+        uint32_t fixtureM=0,fixtureK=1024,fixtureN=8192;
+        if(realProjection){
+            if(!fixtureArray||!expectedArray)throw std::runtime_error("missing fixture or CPU ONNX Runtime reference");
+            jsize length=env->GetArrayLength(fixtureArray);
+            if(length<20)throw std::runtime_error("truncated real-projection fixture");
+            fixtureBytes.resize(size_t(length));
+            env->GetByteArrayRegion(fixtureArray,0,length,reinterpret_cast<jbyte*>(fixtureBytes.data()));
+            if(env->ExceptionCheck())throw std::runtime_error("could not read fixture bytes");
+            if(std::memcmp(fixtureBytes.data(),"SVP1",4)!=0)throw std::runtime_error("bad real-projection fixture magic");
+            uint32_t version=0;
+            std::memcpy(&version,fixtureBytes.data()+4,4);
+            std::memcpy(&fixtureM,fixtureBytes.data()+8,4);
+            std::memcpy(&fixtureK,fixtureBytes.data()+12,4);
+            std::memcpy(&fixtureN,fixtureBytes.data()+16,4);
+            uint64_t inputBytes=uint64_t(fixtureM)*fixtureK*4;
+            uint64_t weightBytes=uint64_t(fixtureN)*fixtureK*2;
+            uint64_t total=20+inputBytes+weightBytes;
+            if(version!=1||fixtureM<1||fixtureM>2048||fixtureK<2||fixtureK>8192||(fixtureK&1)||
+               fixtureN<4||fixtureN>8192||fixtureN%4||total!=fixtureBytes.size())
+                throw std::runtime_error("invalid real-projection fixture dimensions or length");
+            if(env->GetArrayLength(expectedArray)!=jsize(uint64_t(fixtureM)*fixtureN))
+                throw std::runtime_error("CPU ONNX Runtime reference length mismatch");
+            cpuExpected.resize(size_t(fixtureM)*fixtureN);
+            env->GetFloatArrayRegion(expectedArray,0,jsize(cpuExpected.size()),cpuExpected.data());
+            if(env->ExceptionCheck())throw std::runtime_error("could not read CPU reference output");
+            for(float value:cpuExpected)if(!std::isfinite(value))throw std::runtime_error("non-finite CPU reference output");
+        }
+        const auto setupStart=std::chrono::steady_clock::now();
+        double fixtureCopyMs=0.0;
         VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};app.pApplicationName="Seamless compute diagnostic";app.apiVersion=VK_API_VERSION_1_2;
         VkInstanceCreateInfo ici{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};ici.pApplicationInfo=&app;
         check(vkCreateInstance(&ici,nullptr,&r.instance),"vkCreateInstance");
@@ -101,22 +134,25 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         }
         // Positive modes are tiled GEMM; negative -1..-32 are repeated
         // baseline GEMV dispatches; -104/-108/-116 are fused 4/8/16-output kernels.
-        const bool gemv=mode<0;
+        const bool gemv=mode<0&&!realProjection;
         const bool subgroup=mode==-201;
-        const bool fused=mode==-104||mode==-108||mode==-116;
-        const int dispatches=fused||subgroup?1:(gemv?-mode:1);
-        const uint32_t outputsPerGroup=fused?uint32_t(-mode-100):4u;
-        const int rows=gemv?1:mode;
-        const bool validMode=mode==0||mode==1||mode==32||mode==-1||mode==-4||mode==-8||
+        const bool fused=realProjection||mode==-104||mode==-108||mode==-116;
+        const int dispatches=realProjection?1:(fused||subgroup?1:(gemv?-mode:1));
+        const uint32_t outputsPerGroup=realProjection?4u:(fused?uint32_t(-mode-100):4u);
+        const int rows=realProjection?int(fixtureM):(gemv?1:mode);
+        const bool validMode=realProjection||mode==0||mode==1||mode==32||mode==-1||mode==-4||mode==-8||
             mode==-16||mode==-32||mode==-104||mode==-108||mode==-116||subgroup;
         if(!validMode)throw std::runtime_error("unsupported probe mode");
-        constexpr uint32_t K=1024,N=8192;
+        const uint32_t K=realProjection?fixtureK:1024u,N=realProjection?fixtureN:8192u;
         const uint32_t aCount=uint32_t(rows)*K;
         const uint32_t bCount=K*N/2;
         const uint32_t cCount=uint32_t(rows)*N;
         const VkDeviceSize bytes=rows?VkDeviceSize(aCount+bCount+cCount)*4:16*sizeof(float);
         if(bytes>prop.limits.maxStorageBufferRange)throw std::runtime_error("storage buffer limit");
         if(rows&&!fused&&!subgroup&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
+        if(realProjection&&(prop.limits.maxComputeWorkGroupInvocations<32||prop.limits.maxComputeWorkGroupSize[0]<32||
+            prop.limits.maxComputeWorkGroupCount[0]<N/4||prop.limits.maxComputeWorkGroupCount[1]<uint32_t(rows)))
+            throw std::runtime_error("real-projection dispatch exceeds Vulkan workgroup limits");
         if(subgroup&&(!subgroupArithmetic||(subgroupProps.subgroupSize!=16&&subgroupProps.subgroupSize!=32)||
             prop.limits.maxComputeWorkGroupInvocations<subgroupProps.subgroupSize*4||
             prop.limits.maxComputeWorkGroupSize[0]<subgroupProps.subgroupSize||prop.limits.maxComputeWorkGroupSize[1]<4))
@@ -139,14 +175,19 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         auto wi=[](uint32_t k,uint32_t n){return (k*13u+n*7u+(k*n)%19u)%4u;};
         const uint16_t halfBits[]={0x3400,0xb400,0x3800,0xb800};
         const float weights[]={.25f,-.25f,.5f,-.5f};
-        if(rows){
+        if(realProjection){
+            auto copyStart=std::chrono::steady_clock::now();
+            auto words=static_cast<uint32_t*>(r.mapped);
+            std::memcpy(words,fixtureBytes.data()+20,size_t(aCount)*4);
+            std::memcpy(words+aCount,fixtureBytes.data()+20+size_t(aCount)*4,size_t(bCount)*4);
+            std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
+            fixtureCopyMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-copyStart).count();
+        }else if(rows){
             auto words=static_cast<uint32_t*>(r.mapped);
             for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t k=0;k<K;k++){
                 float f=av(m,k);std::memcpy(words+m*K+k,&f,4);
             }
             if(gemv){
-                // Physically transpose B, without changing any of its values.
-                // Each output column is contiguous in reduction dimension.
                 for(uint32_t n=0;n<N;n++)for(uint32_t k=0;k<K;k+=2)
                     words[aCount+(n*K+k)/2]=uint32_t(halfBits[wi(k,n)])|(uint32_t(halfBits[wi(k+1,n)])<<16);
             }else{
@@ -165,13 +206,14 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         VkDescriptorSet set;check(vkAllocateDescriptorSets(r.device,&ai,&set),"descriptor allocation");
         VkDescriptorBufferInfo dbi{r.buffer,0,bytes};VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};w.dstSet=set;w.dstBinding=0;w.descriptorCount=1;w.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;w.pBufferInfo=&dbi;
         vkUpdateDescriptorSets(r.device,1,&w,0,nullptr);
-        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,4};
+        VkPushConstantRange range{VK_SHADER_STAGE_COMPUTE_BIT,0,realProjection?12u:4u};
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pli.setLayoutCount=1;pli.pSetLayouts=&r.setLayout;
-        if(rows&&!fused&&!subgroup){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
+        if(realProjection||(rows&&!fused&&!subgroup)){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
         check(vkCreatePipelineLayout(r.device,&pli,nullptr,&r.layout),"pipeline layout");
         const uint32_t* shaderCode=probe_shader;
         size_t shaderBytes=sizeof(probe_shader);
-        if(subgroup){
+        if(realProjection){shaderCode=real_projection_shader;shaderBytes=sizeof(real_projection_shader);}
+        else if(subgroup){
             if(subgroupProps.subgroupSize==16){shaderCode=gemv_subgroup16_shader;shaderBytes=sizeof(gemv_subgroup16_shader);}
             else {shaderCode=gemv_subgroup32_shader;shaderBytes=sizeof(gemv_subgroup32_shader);}
         }else if(fused){
@@ -198,22 +240,29 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.layout,0,1,&set,0,nullptr);
         if(rows){
             uint32_t m=uint32_t(rows);
-            if(!fused&&!subgroup)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
-            if(gemv){
-                for(int d=0;d<dispatches;d++){
-                    if(d){
-                        VkMemoryBarrier waw{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-                        waw.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;waw.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
-                        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&waw,0,nullptr,0,nullptr);
+            if(realProjection){
+                uint32_t params[3]={K,N,m};
+                vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,12,params);
+                vkCmdDispatch(cmd,N/4,m,1);
+            }else{
+                if(!fused&&!subgroup)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
+                if(gemv){
+                    for(int d=0;d<dispatches;d++){
+                        if(d){
+                            VkMemoryBarrier waw{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                            waw.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;waw.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
+                            vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&waw,0,nullptr,0,nullptr);
+                        }
+                        vkCmdDispatch(cmd,N/outputsPerGroup,1,1);
                     }
-                    vkCmdDispatch(cmd,N/outputsPerGroup,1,1);
-                }
-            }else vkCmdDispatch(cmd,N/16,(m+7)/8,1);
+                }else vkCmdDispatch(cmd,N/16,(m+7)/8,1);
+            }
         }else vkCmdDispatch(cmd,1,1,1);
         if(r.queryPool)vkCmdWriteTimestamp(cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.queryPool,1);
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
         check(vkEndCommandBuffer(cmd),"end command");
+        const double setupMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-setupStart).count();
         VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};check(vkCreateFence(r.device,&fi,nullptr,&r.fence),"fence");
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&cmd;
         std::vector<double> wallUs,gpuUs;
@@ -246,7 +295,21 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
                 }
             }
         }
-        if(rows){
+        if(realProjection){
+            auto words=static_cast<uint32_t*>(r.mapped);
+            double sumError=0.0,sumReference=0.0,maxAbs=0.0,maxReference=0.0;
+            for(uint32_t i=0;i<cCount;i++){
+                float got;std::memcpy(&got,words+aCount+bCount+i,4);
+                if(!std::isfinite(got))throw std::runtime_error("non-finite real-model projection output at index "+std::to_string(i));
+                double diff=double(got)-cpuExpected[i];
+                sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
+                maxAbs=std::max(maxAbs,std::abs(diff));maxReference=std::max(maxReference,std::abs(double(cpuExpected[i])));
+            }
+            const double nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
+            if(nrms>0.002||maxAbs>0.01)
+                throw std::runtime_error("CPU ONNX Runtime parity failed: NRMS="+std::to_string(nrms)+
+                    " max_abs="+std::to_string(maxAbs));
+        }else if(rows){
             // Validate the final output only after all timings to avoid CPU-side
             // reference work perturbing device clocks between measured submits.
             auto words=static_cast<uint32_t*>(r.mapped);
@@ -277,7 +340,29 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode)
         }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
         std::sort(wallUs.begin(),wallUs.end());
         std::sort(gpuUs.begin(),gpuUs.end());
-        if(rows){
+        if(realProjection){
+            double wallMedian=wallUs[wallUs.size()/2];
+            double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
+            double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;
+            double sumError=0.0,sumReference=0.0,maxAbs=0.0;
+            auto words=static_cast<uint32_t*>(r.mapped);
+            for(uint32_t i=0;i<cCount;i++){
+                float got;std::memcpy(&got,words+aCount+bCount+i,4);
+                double diff=double(got)-cpuExpected[i];
+                sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
+                maxAbs=std::max(maxAbs,std::abs(diff));
+            }
+            double nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
+            out<<"Vulkan real-model fused-4 projection "<<rows<<"x"<<K<<"x"<<N<<": PASS | FP16 weights / FP32 accumulation"
+               <<" | CPU ONNX Runtime FP32 reference: all "<<cCount<<" outputs checked"
+               <<" | max_abs "<<maxAbs<<" | NRMS "<<nrms
+               <<" | median GPU "<<(gpuUs.empty()?std::string("unavailable"):std::to_string(gpuMedian/1000.0)+" ms")
+               <<" | median queue+fence "<<wallMedian/1000.0<<" ms"
+               <<" | GPU us/dispatch "<<(gpuUs.empty()?0:gpuMedian)
+               <<" | "<<(2.0*rows*K*N/std::max(1.0,kernelUs)/1000.0)<<" GFLOP/s"
+               <<" | fixture copy "<<fixtureCopyMs<<" ms | setup "<<setupMs<<" ms"
+               <<" | 32 warmups, 11 measured submissions; setup excluded from GPU median";
+        }else if(rows){
             double wallMedian=wallUs[wallUs.size()/2];
             double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
             double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;
