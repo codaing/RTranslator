@@ -64,8 +64,11 @@ final class VulkanProbe {
             double loadMs=(android.os.SystemClock.elapsedRealtimeNanos()-loadStart)/1_000_000.0;
             float[] expected=new float[Math.multiplyExact(m,n)];
             double[] cpuMs=new double[11];
+            ByteBuffer directInput=ByteBuffer.allocateDirect(activation.length*4).order(ByteOrder.nativeOrder());
+            FloatBuffer inputBuffer=directInput.asFloatBuffer();
+            inputBuffer.put(activation);inputBuffer.flip();
             try(OrtSession cpu=session;
-                OnnxTensor input=OnnxTensor.createTensor(environment,FloatBuffer.wrap(activation),new long[]{m,k})){
+                OnnxTensor input=OnnxTensor.createTensor(environment,inputBuffer,new long[]{m,k})){
                 for(int i=0;i<14;i++){
                     long start=android.os.SystemClock.elapsedRealtimeNanos();
                     try(OrtSession.Result result=cpu.run(Collections.singletonMap("x",input))){

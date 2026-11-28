@@ -39,6 +39,8 @@ jobs:
           test -s models/encoder.int8.onnx
           test -s models/decoder.source-projections.onnx
           test -s models/MODEL-LICENSE.txt
+          echo "External model data files:"
+          find models -maxdepth 1 -type f \( -name '*.weights' -o -name '*.data' \) -printf '%f %s bytes\n' | sort
           df -h .
       - uses: actions/setup-java@v4
         with:

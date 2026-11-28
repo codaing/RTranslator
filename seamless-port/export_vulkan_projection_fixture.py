@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import onnx
 from onnx import TensorProto as T, helper as h, numpy_helper as nh
-from onnx.external_data_helper import load_external_data_for_tensor
 import onnxruntime as ort
 
 MAGIC = b"SVP1"
@@ -96,8 +95,8 @@ def _constant_array(name, initializers, producers, base_dir, cache=None):
         return cache[name]
     tensor = initializers.get(name)
     if tensor is not None:
-        if tensor.data_location == T.EXTERNAL:
-            load_external_data_for_tensor(tensor, str(base_dir))
+        if tensor.data_location == T.EXTERNAL and not tensor.raw_data:
+            raise FileNotFoundError(f"external initializer bytes were not loaded: {tensor.name}")
         value = nh.to_array(tensor)
     else:
         node = producers.get(name)
@@ -177,8 +176,8 @@ def _capture_value_info(model, names):
 
 
 def export(directory, fbank_path, output_dir):
-    directory = Path(directory)
-    output_dir = Path(output_dir)
+    directory = Path(directory).resolve()
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     encoder_path = directory / "encoder.int8.onnx"
     source_path = directory / "decoder.source-projections.onnx"
@@ -203,7 +202,7 @@ def export(directory, fbank_path, output_dir):
     encoded = encoder.run([encoded_name], {encoder_input: features})[0]
     del encoder
 
-    source_model = onnx.load(str(source_path), load_external_data=False)
+    source_model = onnx.load(str(source_path.resolve()), load_external_data=True)
     candidates, initializers, producers = _candidate_nodes(source_model)
     if not candidates:
         raise RuntimeError("no compatible FP16 source-projection MatMul found")
@@ -230,7 +229,7 @@ def export(directory, fbank_path, output_dir):
                 raise ValueError(f"activation shape {activation.shape} does not end in K={k}")
             x = np.ascontiguousarray(activation.reshape(-1, k), dtype=np.float32)
             m = x.shape[0]
-            if original_output.size != m * n or m < 1 or m > 2048:
+            if original_output.size != m * n or m < 1 or m > 2048 or m * k > 8 * 1024 * 1024 or m * n > 8 * 1024 * 1024:
                 raise ValueError(f"MatMul output shape {original_output.shape} is incompatible with M={m}, N={n}")
             if not np.isfinite(x).all() or not np.isfinite(weight).all():
                 raise ValueError("non-finite model activation or weight")
