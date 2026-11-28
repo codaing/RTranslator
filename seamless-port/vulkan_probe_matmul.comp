@@ -1,0 +1,27 @@
+#version 450
+// A [M,1024] fp32, B [1024,8192] packed half, C [M,8192] fp32.
+// Tiled 8x16 outputs, 16-element reduction tile. No shader-f16 feature required.
+layout(local_size_x=16,local_size_y=8,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+layout(push_constant) uniform Shape { uint m; } shape;
+shared float a[8][16];
+shared float b[16][16];
+void main(){
+    const uint K=1024u,N=8192u;
+    uint x=gl_LocalInvocationID.x,y=gl_LocalInvocationID.y;
+    uint row=gl_WorkGroupID.y*8u+y,col=gl_WorkGroupID.x*16u+x;
+    uint baseB=shape.m*K,baseC=baseB+K*N/2u;
+    float total=0.0;
+    for(uint k0=0u;k0<K;k0+=16u){
+        a[y][x]=row<shape.m?uintBitsToFloat(data.v[row*K+k0+x]):0.0;
+        for(uint k=y;k<16u;k+=8u){
+            uint i=(k0+k)*N+col;
+            vec2 w=unpackHalf2x16(data.v[baseB+i/2u]);
+            b[k][x]=(i&1u)==0u?w.x:w.y;
+        }
+        barrier();
+        for(uint k=0u;k<16u;k++)total+=a[y][k]*b[k][x];
+        barrier();
+    }
+    if(row<shape.m)data.v[baseC+row*N+col]=floatBitsToUint(total);
+}

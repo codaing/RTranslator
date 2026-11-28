@@ -101,6 +101,8 @@ public final class MainActivity extends Activity {
                 report.append("\nAndroid ").append(android.os.Build.VERSION.RELEASE)
                       .append(" | SDK ").append(android.os.Build.VERSION.SDK_INT);
                 report.append("\n").append(VulkanProbe.run());
+                if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(1));
+                if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(32));
                 boolean fp32=false;
                 java.util.Map<String,String> options=java.util.Collections.emptyMap();
                 boolean optimized=false;
@@ -109,9 +111,11 @@ public final class MainActivity extends Activity {
                 catch(Exception e){report.append("\nWebGPU FP32 default: FAILED ").append(e);}
                 report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
                 if(!fp32&&!stopRequested){
-                    // Separate context and documented adapter/validation options.
-                    // Diagnostic only; never silently change real-model settings.
-                    options=java.util.Map.of("deviceId","1","powerPreference","high-performance","validationMode","full");
+                    // Default-owned context only; nonzero deviceId requires external Dawn handles.
+                    // Diagnostic only: eliminate buffer pooling and request full validation.
+                    options=java.util.Map.of("deviceId","0","validationMode","full",
+                        "storageBufferCacheMode","disabled","uniformBufferCacheMode","disabled",
+                        "queryResolveBufferCacheMode","disabled","defaultBufferCacheMode","disabled");
                     optimized=true;t=android.os.SystemClock.elapsedRealtime();
                     try{GpuTuning.probe(this,false,options,true);fp32=true;report.append("\nWebGPU FP32 alternate: PASS");}
                     catch(Exception e){report.append("\nWebGPU FP32 alternate: FAILED ").append(e);}
