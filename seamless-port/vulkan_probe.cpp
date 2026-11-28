@@ -9,6 +9,7 @@
 #include <atomic>
 #include "probe_shader.h"
 #include "matmul_shader.h"
+#include "gemv_shader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -53,7 +54,7 @@ struct Resources {
 std::atomic<bool> timedOut{false};
 }
 extern "C" JNIEXPORT jstring JNICALL
-Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows){
+Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode){
     std::ostringstream out;
     if(timedOut.load())return env->NewStringUTF("Direct Vulkan: previous queue failure; restart app before retry");
     Resources r;
@@ -79,14 +80,19 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows)
         VkDeviceCreateInfo di{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};di.queueCreateInfoCount=1;di.pQueueCreateInfos=&qi;
         check(vkCreateDevice(physical,&di,nullptr,&r.device),"vkCreateDevice");
         VkQueue queue;vkGetDeviceQueue(r.device,family,0,&queue);
-        if(rows!=0&&rows!=1&&rows!=32)throw std::runtime_error("unsupported probe rows");
+        // mode -1: output-major packed weights + specialized GEMV.
+        // mode -8: same GEMV, eight dispatches per submission (warm same weights).
+        const bool gemv=mode<0;
+        const int dispatches=mode==-8?8:1;
+        const int rows=gemv?1:mode;
+        if(mode!=-1&&mode!=-8&&mode!=0&&mode!=1&&mode!=32)throw std::runtime_error("unsupported probe mode");
         constexpr uint32_t K=1024,N=8192;
         const uint32_t aCount=uint32_t(rows)*K;
         const uint32_t bCount=K*N/2;
         const uint32_t cCount=uint32_t(rows)*N;
         const VkDeviceSize bytes=rows?VkDeviceSize(aCount+bCount+cCount)*4:16*sizeof(float);
         if(bytes>prop.limits.maxStorageBufferRange)throw std::runtime_error("storage buffer limit");
-        if(rows&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<16||prop.limits.maxComputeWorkGroupSize[1]<8))throw std::runtime_error("workgroup limit");
+        if(rows&&(prop.limits.maxComputeWorkGroupInvocations<128||prop.limits.maxComputeWorkGroupSize[0]<(gemv?32u:16u)||prop.limits.maxComputeWorkGroupSize[1]<(gemv?4u:8u)))throw std::runtime_error("workgroup limit");
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};bi.size=bytes;bi.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;bi.sharingMode=VK_SHARING_MODE_EXCLUSIVE;
         check(vkCreateBuffer(r.device,&bi,nullptr,&r.buffer),"vkCreateBuffer");
         VkMemoryRequirements req{};vkGetBufferMemoryRequirements(r.device,r.buffer,&req);
@@ -109,8 +115,15 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows)
             for(uint32_t m=0;m<uint32_t(rows);m++)for(uint32_t k=0;k<K;k++){
                 float f=av(m,k);std::memcpy(words+m*K+k,&f,4);
             }
-            for(uint32_t k=0;k<K;k++)for(uint32_t n=0;n<N;n+=2)
-                words[aCount+(k*N+n)/2]=uint32_t(halfBits[wi(k,n)])|(uint32_t(halfBits[wi(k,n+1)])<<16);
+            if(gemv){
+                // Physically transpose B, without changing any of its values.
+                // Each output column is contiguous in reduction dimension.
+                for(uint32_t n=0;n<N;n++)for(uint32_t k=0;k<K;k+=2)
+                    words[aCount+(n*K+k)/2]=uint32_t(halfBits[wi(k,n)])|(uint32_t(halfBits[wi(k+1,n)])<<16);
+            }else{
+                for(uint32_t k=0;k<K;k++)for(uint32_t n=0;n<N;n+=2)
+                    words[aCount+(k*N+n)/2]=uint32_t(halfBits[wi(k,n)])|(uint32_t(halfBits[wi(k,n+1)])<<16);
+            }
             std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
         }else for(int i=0;i<16;i++)values[i]=float(i+1);
         VkDescriptorSetLayoutBinding binding{};binding.binding=0;binding.descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;binding.descriptorCount=1;binding.stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
@@ -127,7 +140,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows)
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pli.setLayoutCount=1;pli.pSetLayouts=&r.setLayout;
         if(rows){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
         check(vkCreatePipelineLayout(r.device,&pli,nullptr,&r.layout),"pipeline layout");
-        VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};si.codeSize=rows?sizeof(matmul_shader):sizeof(probe_shader);si.pCode=rows?matmul_shader:probe_shader;
+        VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};si.codeSize=gemv?sizeof(gemv_shader):rows?sizeof(matmul_shader):sizeof(probe_shader);si.pCode=gemv?gemv_shader:rows?matmul_shader:probe_shader;
         check(vkCreateShaderModule(r.device,&si,nullptr,&r.shader),"shader module");
         VkComputePipelineCreateInfo pci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};pci.layout=r.layout;pci.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;pci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pci.stage.module=r.shader;pci.stage.pName="main";
         check(vkCreateComputePipelines(r.device,VK_NULL_HANDLE,1,&pci,nullptr,&r.pipeline),"compute pipeline");
@@ -142,7 +155,16 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows)
         if(rows){
             uint32_t m=uint32_t(rows);
             vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
-            vkCmdDispatch(cmd,N/16,(m+7)/8,1);
+            if(gemv){
+                for(int d=0;d<dispatches;d++){
+                    if(d){
+                        VkMemoryBarrier waw{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                        waw.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;waw.dstAccessMask=VK_ACCESS_SHADER_WRITE_BIT;
+                        vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,0,1,&waw,0,nullptr,0,nullptr);
+                    }
+                    vkCmdDispatch(cmd,N/4,1,1);
+                }
+            }else vkCmdDispatch(cmd,N/16,(m+7)/8,1);
         }else vkCmdDispatch(cmd,1,1,1);
         VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
         vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
@@ -185,7 +207,8 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint rows)
         std::sort(timings.begin(),timings.end());
         if(rows){
             auto median=timings[timings.size()/2];
-            out<<"Vulkan MatMul "<<rows<<"x1024x8192: PASS | FP16 stored / FP32 accumulate | median "<<median/1000.0<<" ms | min "<<timings.front()/1000.0<<" ms | "<<(2.0*rows*K*N/std::max(1LL,median)/1000.0)<<" GFLOP/s | 5 warm runs, queue+fence; excludes setup";
+            out<<"Vulkan "<<(gemv?"GEMV output-major":"MatMul tiled")<<" "<<rows<<"x1024x8192: PASS | FP16 stored / FP32 accumulate | "<<dispatches<<" dispatch(es)/submit | median "<<median/1000.0<<" ms | min "<<timings.front()/1000.0<<" ms | median per dispatch "<<median/(1000.0*dispatches)<<" ms | "<<(2.0*rows*K*N*dispatches/std::max(1LL,median)/1000.0)<<" GFLOP/s | 5 warm runs, queue+fence; excludes setup";
+            if(dispatches>1)out<<" | repeated same weights, final output checked";
         }else out<<"Direct Vulkan compute/readback: PASS ("<<timings[0]<<" us queue + fence; synthetic only)";
         if(prop.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU)out<<" [software CPU device]";
     }catch(const std::exception& e){out<<"Direct Vulkan: FAIL "<<e.what();}

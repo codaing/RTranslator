@@ -7,7 +7,7 @@ on:
       - 'seamless-port/make_android_fixture.py'
       - 'seamless-port/android_test.sh'
       - 'seamless-port/check_native.py'
-      - 'seamless-port/vulkan_probe.*'
+      - 'seamless-port/vulkan_probe*'
       - 'seamless-port/build_vulkan_probe.sh'
       - '.github/workflows/seamless-apk.yml'
       - 'build.gradle'

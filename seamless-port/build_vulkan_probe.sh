@@ -8,10 +8,11 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe.comp -o "$TMP/probe.spv"
 "$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe_matmul.comp -o "$TMP/matmul.spv"
+"$GLSLC" --target-env=vulkan1.0 -O seamless-port/vulkan_probe_gemv.comp -o "$TMP/gemv.spv"
 python - "$TMP" <<'PY'
 import pathlib,struct,sys
 d=pathlib.Path(sys.argv[1])
-for name in ("probe","matmul"):
+for name in ("probe","matmul","gemv"):
     data=(d/(name+".spv")).read_bytes()
     words=struct.unpack("<"+"I"*(len(data)//4),data)
     assert words[0]==0x07230203

@@ -1,0 +1,27 @@
+#version 450
+// A [1024] float32; B physically transposed to [8192,1024] packed FP16;
+// C [8192] float32. One group computes four independent output dot products.
+// Each of 32 reduction lanes processes 16 packed pairs; contiguous reads,
+// parallel reduction; no seven padded rows or 64 shared-memory tile barriers.
+layout(local_size_x=32,local_size_y=4,local_size_z=1) in;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+shared float partial[4][32];
+void main(){
+    const uint K=1024u,N=8192u;
+    uint lane=gl_LocalInvocationID.x, y=gl_LocalInvocationID.y;
+    uint n=gl_WorkGroupID.x*4u+y;
+    uint b0=K+n*(K/2u);
+    float accum=0.0;
+    for(uint p=lane;p<K/2u;p+=32u){
+        vec2 w=unpackHalf2x16(data.v[b0+p]);
+        vec2 a=vec2(uintBitsToFloat(data.v[2u*p]),uintBitsToFloat(data.v[2u*p+1u]));
+        accum+=dot(a,w);
+    }
+    partial[y][lane]=accum;
+    barrier();
+    for(uint offset=16u;offset>0u;offset>>=1u){
+        if(lane<offset)partial[y][lane]+=partial[y][lane+offset];
+        barrier();
+    }
+    if(lane==0u)data.v[K+K*N/2u+n]=floatBitsToUint(partial[y][0]);
+}

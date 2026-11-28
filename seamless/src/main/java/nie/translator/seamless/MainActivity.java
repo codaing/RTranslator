@@ -37,7 +37,7 @@ public final class MainActivity extends Activity {
         ArrayAdapter<GpuTuning> gpuAdapter=new ArrayAdapter<>(this,android.R.layout.simple_spinner_item,GpuTuning.values());
         gpuAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         gpuProfile.setAdapter(gpuAdapter);gpuProfile.setSelection(0);panel.addView(gpuProfile);
-        probeGpu=new Button(this);probeGpu.setText("Test WebGPU FP32 / FP16 (no model needed)");panel.addView(probeGpu);
+        probeGpu=new Button(this);probeGpu.setText("Test native Vulkan speed (no model needed)");panel.addView(probeGpu);
         probeGpu.setOnClickListener(v->runGpuProbe());
         load=new Button(this);load.setText("Import model ZIP");panel.addView(load);
         start=new Button(this);start.setText("Start continuous interpretation test");panel.addView(start);
@@ -94,42 +94,18 @@ public final class MainActivity extends Activity {
     }
     private void runGpuProbe(){
         if(busy)return;
-        busy=true;stopRequested=false;lastReport=null;buttons();show("Testing GPU-only matrix multiplication…");
+        busy=true;stopRequested=false;lastReport=null;buttons();show("Testing native Vulkan matrix kernels…");
         worker.execute(()->{
-            StringBuilder report=new StringBuilder("WebGPU capability probe (CPU fallback disabled)\nDevice "+android.os.Build.MODEL);
+            StringBuilder report=new StringBuilder("Native Vulkan speed probe (synthetic, no CPU fallback)\nDevice "+android.os.Build.MODEL);
             try{
                 report.append("\nAndroid ").append(android.os.Build.VERSION.RELEASE)
                       .append(" | SDK ").append(android.os.Build.VERSION.SDK_INT);
                 report.append("\n").append(VulkanProbe.run());
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(1));
                 if(!stopRequested)report.append("\n").append(VulkanProbe.matmul(32));
-                boolean fp32=false;
-                java.util.Map<String,String> options=java.util.Collections.emptyMap();
-                boolean optimized=false;
-                long t=android.os.SystemClock.elapsedRealtime();
-                try{GpuTuning.probe(this,false);fp32=true;report.append("\nWebGPU FP32 default: PASS");}
-                catch(Exception e){report.append("\nWebGPU FP32 default: FAILED ").append(e);}
-                report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
-                if(!fp32&&!stopRequested){
-                    // Default-owned context only; nonzero deviceId requires external Dawn handles.
-                    // Diagnostic only: eliminate buffer pooling and request full validation.
-                    options=java.util.Map.of("deviceId","0","validationMode","full",
-                        "storageBufferCacheMode","disabled","uniformBufferCacheMode","disabled",
-                        "queryResolveBufferCacheMode","disabled","defaultBufferCacheMode","disabled");
-                    optimized=true;t=android.os.SystemClock.elapsedRealtime();
-                    try{GpuTuning.probe(this,false,options,true);fp32=true;report.append("\nWebGPU FP32 alternate: PASS");}
-                    catch(Exception e){report.append("\nWebGPU FP32 alternate: FAILED ").append(e);}
-                    report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
-                }
-                if(fp32&&!stopRequested){
-                    t=android.os.SystemClock.elapsedRealtime();
-                    try{GpuTuning.probe(this,true,options,optimized);report.append("\nWebGPU FP16: PASS");}
-                    catch(ai.onnxruntime.OrtException e){
-                        report.append(GpuTuning.missingShaderF16(e)?"\nFP16: shader-f16 unsupported":"\nFP16: FAILED");
-                        report.append("\n").append(e.getMessage());
-                    }
-                    report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
-                }else report.append("\nFP16: NOT TESTED");
+                if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(false));
+                if(!stopRequested)report.append("\n").append(VulkanProbe.gemv(true));
+                report.append("\nWebGPU retry deferred: repeated Pixel readback timeout.");
             }catch(Exception|OutOfMemoryError e){report.append("\nProbe failed: ").append(e);}
             finally{
                 lastReport=report.toString();show(lastReport);done();

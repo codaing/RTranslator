@@ -14,5 +14,6 @@ final class VulkanProbe {
             return nativeRun(rows);
         }catch(LinkageError e){return "Vulkan MatMul unavailable: "+e;}
     }
-    private static native String nativeRun(int rows);
+    static String gemv(boolean batched){return matmul(batched?-8:-1);}
+    private static native String nativeRun(int mode);
 }
