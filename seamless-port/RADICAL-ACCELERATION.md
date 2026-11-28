@@ -98,3 +98,12 @@ The M=31 tail passes all three preliminary thresholds at group sizes 8, 16, 32 a
 Next conversion now sweeps group sizes 8, 16, 32 and 64 for both the M=1 first row and M=31 tail, and reassembles every 4x4 pairing for CPU and TPU audits. This determines whether smaller independent output groups eliminate the first-row localized error. Benchmark byte-count parsing is also corrected to strip the filename emitted by wc -c before checking the exact expected output length.
 
 The successful CI run 46133878691 is conversion-only. It generated 9 models in the first sweep artifact but did not execute the generated adb commands on a Pixel device. No physical-device latency or TPU parity is claimed from this CI result.
+
+
+## First-row coarse output-group sweep (2026-11-28)
+
+The second conversion sweep tested M=1 first-row output group sizes 8, 16, 32 and 64. Global NRMS stayed below 1% (0.697–0.955%), but maximum group NRMS remained above 5% at every size: 15.65%, 12.02%, 11.23% and 8.23%, respectively. Thus smaller output groups do not solve the first-row localized relative error. Group size 64 is the best of this first sweep, but still fails the strict per-group threshold.
+
+The next sweep extends only the M=1 segment to group sizes 64, 128, 256, 512 and 1024, while retaining M=31 tail sizes 8, 16, 32 and 64. Larger groups may reduce localized relative error by combining low-energy channels, but could also worsen absolute quantization resolution; all global, per-row, and per-group metrics remain visible. The expansion activation channel statistics are now computed only over channels with non-negligible reference norm, so permanently inactive channels do not produce meaningless 1e11 relative-error maxima.
+
+The row-split models remain a host numerical experiment. Physical Pixel 9a TPU execution, exact device CPU/TPU parity, sustained latency, held-out speech and end-to-end RTF are still pending.

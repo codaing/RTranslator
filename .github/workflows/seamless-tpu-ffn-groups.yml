@@ -33,7 +33,7 @@ jobs:
         run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4' 'scipy==1.15.3'
       - name: Convert grouped-output FFN models
         run: |
-          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_ffn_grouped.py tpu-capture tpu-benchmark --tail-group-sizes 8,16,32,64
+          TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_ffn_grouped.py tpu-capture tpu-benchmark --first-group-sizes 64,128,256,512,1024 --tail-group-sizes 8,16,32,64
           cp seamless-port/compare_tpu_ffn_outputs.py tpu-benchmark/
           cp seamless-port/aggregate_tpu_ffn_split.py tpu-benchmark/
           cp tpu-capture/MODEL-LICENSE.txt tpu-benchmark/

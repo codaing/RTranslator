@@ -43,7 +43,7 @@ def _load_capture(source):
     return meta, weights, cases
 
 
-def _build_workloads(cases, tail_group_sizes):
+def _build_workloads(cases, first_group_sizes, tail_group_sizes):
     full = [(x, y) for x, y in cases if len(x) == 32]
     if len(full) < 2:
         raise ValueError("need at least two real M=32 prefill calls")
@@ -57,7 +57,7 @@ def _build_workloads(cases, tail_group_sizes):
 
     return [
         ("m32-full", full, [32], 0),
-        ("m1-prefill-first", first_rows, tail_group_sizes, 0),
+        ("m1-prefill-first", first_rows, first_group_sizes, 0),
         ("m31-prefill-tail", tail_rows, tail_group_sizes, 1),
     ]
 
@@ -166,19 +166,21 @@ def _expansion_quantization_report(
     if reference.shape != dequantized.shape:
         raise ValueError("expansion intermediate shape mismatch")
 
+    channel_norms = np.linalg.norm(reference.astype(np.float64), axis=0)
+    active_channels = channel_norms > max(float(np.max(channel_norms)) * 1e-6, 1e-8)
     channel_error = np.linalg.norm(
-        (dequantized - reference).astype(np.float64), axis=0
-    ) / np.maximum(
-        np.linalg.norm(reference.astype(np.float64), axis=0), 1e-12
-    )
+        (dequantized - reference).astype(np.float64)[:, active_channels], axis=0
+    ) / channel_norms[active_channels]
     return {
         "scale": float(scale),
         "zero_point": int(zero),
         "vs_fp32": metrics(reference, dequantized),
-        "channel_nrms_p50": float(np.percentile(channel_error, 50)),
-        "channel_nrms_p95": float(np.percentile(channel_error, 95)),
-        "channel_nrms_p99": float(np.percentile(channel_error, 99)),
-        "channel_nrms_max": float(np.max(channel_error)),
+        "active_channel_count": int(np.count_nonzero(active_channels)),
+        "inactive_channel_count": int(np.count_nonzero(~active_channels)),
+        "channel_nrms_p50_active": float(np.percentile(channel_error, 50)),
+        "channel_nrms_p95_active": float(np.percentile(channel_error, 95)),
+        "channel_nrms_p99_active": float(np.percentile(channel_error, 99)),
+        "channel_nrms_max_active": float(np.max(channel_error)),
         "zero_fraction": float(np.mean(raw == int(zero))),
         "positive_saturation_fraction": float(np.mean(raw == 127)),
     }
@@ -443,20 +445,28 @@ def _convert_variant(
     return report
 
 
-def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
+def convert(
+    source,
+    output,
+    first_group_sizes=(64, 128, 256, 512, 1024),
+    tail_group_sizes=(8, 16, 32, 64),
+):
     output_dir = Path(output)
     output_dir.mkdir(parents=True, exist_ok=True)
     meta, weights, cases = _load_capture(source)
+    first_group_sizes = list(dict.fromkeys(int(value) for value in first_group_sizes))
     tail_group_sizes = list(dict.fromkeys(int(value) for value in tail_group_sizes))
+    if not first_group_sizes:
+        raise ValueError("at least one first-row group size is required")
     if not tail_group_sizes:
         raise ValueError("at least one tail group size is required")
-    for group_size in tail_group_sizes:
+    for group_size in first_group_sizes + tail_group_sizes:
         if group_size <= 0 or CHANNELS % group_size:
             raise ValueError(f"invalid output group size: {group_size}")
 
     reports = []
     for workload_name, workload_cases, group_sizes, row_offset in _build_workloads(
-        cases, tail_group_sizes
+        cases, first_group_sizes, tail_group_sizes
     ):
         evaluation_case = workload_cases[-1]
         calibration_cases = workload_cases[:-1]
@@ -561,7 +571,7 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
     # Reassemble the split first-row + tail result and compare with
     # the single M=32 baseline for each physical backend.
     for backend in ("cpu", "tpu"):
-        for first_group_size in tail_group_sizes:
+        for first_group_size in first_group_sizes:
             for tail_group_size in tail_group_sizes:
                 commands.extend([
                     "",
@@ -588,7 +598,9 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
         "The M=32 prefill batch is evaluated as: (1) one M=32 baseline, "
         "(2) a separate M=1 model for the first row, and (3) an M=31 model "
         "for rows 1..31. Both split segments sweep output group sizes 8, 16, "
-        "32 and 64. The first row is calibrated only from first rows of the "
+        "32 and 64 for the M=31 tail; M=1 first-row groups are 64, 128, "
+        "256, 512 and 1024. Each segment is calibrated independently. "
+        "The first row is calibrated only from first rows of the "
         "captured M=32 calls; the tail is calibrated only from the remaining "
         "31 rows. Each manifest entry reports global, per-row and per-output-"
         "group errors, plus the actual quantized expansion intermediate. "
@@ -608,13 +620,22 @@ if __name__ == "__main__":
     parser.add_argument("source")
     parser.add_argument("output")
     parser.add_argument(
+        "--first-group-sizes",
+        default="64,128,256,512,1024",
+        help="comma-separated output group sizes for the M=1 first row",
+    )
+    parser.add_argument(
         "--tail-group-sizes",
         default="8,16,32,64",
-        help="comma-separated output group sizes for both M=1 and M=31 segments",
+        help="comma-separated output group sizes for the M=31 tail",
     )
     args = parser.parse_args()
-    sizes = [
+    first_sizes = [
+        int(value.strip()) for value in args.first_group_sizes.split(",")
+        if value.strip()
+    ]
+    tail_sizes = [
         int(value.strip()) for value in args.tail_group_sizes.split(",")
         if value.strip()
     ]
-    convert(args.source, args.output, sizes)
+    convert(args.source, args.output, first_sizes, tail_sizes)
