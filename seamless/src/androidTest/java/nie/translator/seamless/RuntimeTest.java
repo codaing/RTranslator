@@ -12,8 +12,16 @@ import java.io.InputStream;
 @RunWith(AndroidJUnit4.class)
 public class RuntimeTest {
     @Test public void realModelVulkanProjectionMatchesCpuReference() throws Exception {
-        // Actual model weights and speech-derived activation are embedded in the target APK.
+        // Generic synthetic APKs do not carry the large real-model fixture. The dedicated
+        // real-projection workflow embeds it and requires this test to execute and pass.
         android.content.Context target=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        boolean fixturePresent;
+        try(InputStream ignored=target.getAssets().open("vulkan-real-projection.bin")){
+            fixturePresent=true;
+        }catch(java.io.IOException missing){
+            fixturePresent=false;
+        }
+        org.junit.Assume.assumeTrue("real model projection fixture is not embedded in this APK",fixturePresent);
         String report=VulkanProbe.realProjection(target);
         android.util.Log.i("RealProjectionProbe",report.replace('\n',' '));
         assertTrue("Actual model Vulkan projection must match CPU ONNX Runtime: "+report,
