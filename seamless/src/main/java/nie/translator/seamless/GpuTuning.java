@@ -48,6 +48,10 @@ enum GpuTuning {
     }
     /** Execute a real GPU-only graph. A provider listing is not proof of execution. */
     static void probe(android.content.Context context,boolean half)throws Exception{
+        probe(context,half,Collections.emptyMap(),false);
+    }
+    static void probe(android.content.Context context,boolean half,java.util.Map<String,String> providerOptions,
+                      boolean optimized)throws Exception{
         if(!OrtEnvironment.getAvailableProviders().toString().contains("WEBGPU"))
             throw new IllegalStateException("WebGPU provider unavailable");
         byte[] model;
@@ -61,9 +65,9 @@ enum GpuTuning {
         OrtEnvironment env=OrtEnvironment.getEnvironment();
         try(OrtSession.SessionOptions opts=new OrtSession.SessionOptions()){
             opts.setIntraOpNumThreads(1);
-            opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT);
+            if(!optimized)opts.setOptimizationLevel(OrtSession.SessionOptions.OptLevel.NO_OPT);
             opts.addConfigEntry("session.disable_cpu_ep_fallback","1");
-            opts.addWebGPU(Collections.emptyMap());
+            opts.addWebGPU(providerOptions);
             try(OrtSession session=env.createSession(model,opts);
                 OnnxTensor x=OnnxTensor.createTensor(env,new float[][]{{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}});
                 OrtSession.Result r=session.run(Collections.singletonMap("x",x))){

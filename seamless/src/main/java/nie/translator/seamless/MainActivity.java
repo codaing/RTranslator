@@ -98,12 +98,34 @@ public final class MainActivity extends Activity {
         worker.execute(()->{
             StringBuilder report=new StringBuilder("WebGPU capability probe (CPU fallback disabled)\nDevice "+android.os.Build.MODEL);
             try{
-                GpuTuning.probe(this,false);report.append("\nFP32: PASS");
-                try{GpuTuning.probe(this,true);report.append("\nFP16: PASS");}
-                catch(ai.onnxruntime.OrtException e){
-                    report.append(GpuTuning.missingShaderF16(e)?"\nFP16: shader-f16 unsupported":"\nFP16: FAILED");
-                    report.append("\n").append(e.getMessage());
+                report.append("\nAndroid ").append(android.os.Build.VERSION.RELEASE)
+                      .append(" | SDK ").append(android.os.Build.VERSION.SDK_INT);
+                report.append("\n").append(VulkanProbe.run());
+                boolean fp32=false;
+                java.util.Map<String,String> options=java.util.Collections.emptyMap();
+                boolean optimized=false;
+                long t=android.os.SystemClock.elapsedRealtime();
+                try{GpuTuning.probe(this,false);fp32=true;report.append("\nWebGPU FP32 default: PASS");}
+                catch(Exception e){report.append("\nWebGPU FP32 default: FAILED ").append(e);}
+                report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
+                if(!fp32&&!stopRequested){
+                    // Separate context and documented adapter/validation options.
+                    // Diagnostic only; never silently change real-model settings.
+                    options=java.util.Map.of("deviceId","1","powerPreference","high-performance","validationMode","full");
+                    optimized=true;t=android.os.SystemClock.elapsedRealtime();
+                    try{GpuTuning.probe(this,false,options,true);fp32=true;report.append("\nWebGPU FP32 alternate: PASS");}
+                    catch(Exception e){report.append("\nWebGPU FP32 alternate: FAILED ").append(e);}
+                    report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
                 }
+                if(fp32&&!stopRequested){
+                    t=android.os.SystemClock.elapsedRealtime();
+                    try{GpuTuning.probe(this,true,options,optimized);report.append("\nWebGPU FP16: PASS");}
+                    catch(ai.onnxruntime.OrtException e){
+                        report.append(GpuTuning.missingShaderF16(e)?"\nFP16: shader-f16 unsupported":"\nFP16: FAILED");
+                        report.append("\n").append(e.getMessage());
+                    }
+                    report.append(" (").append(android.os.SystemClock.elapsedRealtime()-t).append(" ms)");
+                }else report.append("\nFP16: NOT TESTED");
             }catch(Exception|OutOfMemoryError e){report.append("\nProbe failed: ").append(e);}
             finally{
                 lastReport=report.toString();show(lastReport);done();

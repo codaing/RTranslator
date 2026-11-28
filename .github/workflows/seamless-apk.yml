@@ -7,6 +7,8 @@ on:
       - 'seamless-port/make_android_fixture.py'
       - 'seamless-port/android_test.sh'
       - 'seamless-port/check_native.py'
+      - 'seamless-port/vulkan_probe.*'
+      - 'seamless-port/build_vulkan_probe.sh'
       - '.github/workflows/seamless-apk.yml'
       - 'build.gradle'
       - 'settings.gradle'
@@ -35,7 +37,8 @@ jobs:
           set +o pipefail
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null
           set -o pipefail
-          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "build-tools;34.0.0"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "build-tools;34.0.0" "ndk;28.2.13676358"
+          bash seamless-port/build_vulkan_probe.sh
           python -m pip install 'numpy<2' 'onnx==1.16.2'
           python seamless-port/make_android_fixture.py
       - name: Build minimal APK and instrumentation tests
