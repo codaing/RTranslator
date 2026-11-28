@@ -59,7 +59,7 @@ class IncrementalDecoder:
         return token,probability,features
 
 
-def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0):
+def run(directory,fbank,out,update_frames=64,session_profile='default',source_projections=False,threads=4,encoder_window=0,unit_duration_gate=False):
     directory=Path(directory)
     meta=json.loads((directory/"tokenizer.json").read_text())
     features=np.fromfile(fbank,dtype="<f4").reshape(-1,80)
@@ -92,11 +92,16 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
     if source_projections:
         projection=ort.InferenceSession(str(directory/"decoder.source-projections.onnx"),decoder_opts,providers=["CPUExecutionProvider"])
         print(json.dumps({"loaded":"decoder.source-projections.onnx","rss_mib":rss_mib()}),flush=True)
+    duration_session=None
+    if unit_duration_gate:
+        duration_session=ort.InferenceSession(str(directory/"units.duration-only.onnx"),opts,
+                                             providers=["CPUExecutionProvider"])
     load_time=time.monotonic()-start
     tokens=list(meta["prefix"]);duration_start=0;first_audio=None;waves=[];times=[]
-    phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0,"source_projection_seconds":0.0}
+    phase_totals={"encoder_seconds":0.0,"decoder_seconds":0.0,"units_seconds":0.0,"vocoder_seconds":0.0,"source_projection_seconds":0.0,"duration_gate_seconds":0.0}
     decisions=[]
     decoder_calls=0;decoder_input_tokens=0
+    unit_calls=0;duration_gate_calls=0;unit_calls_skipped=0
 
     def predict(ids,encoded):
         nonlocal decoder_calls,decoder_input_tokens
@@ -182,25 +187,38 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
                 feats=np.asarray([feature_rows+[comma_features[0][0]]],dtype=np.float32)
             else:
                 _,_,feats=predict(ids,encoded)
-            phase_start=time.monotonic()
-            logits,durations=unit.run(["logits","durations"],
-                {"features":feats,"chars":chars,"char_lens":lengths})
-            units_elapsed=time.monotonic()-phase_start;phase_totals["units_seconds"]+=units_elapsed
-            d=durations[0]
-            if duration_start>len(d) or np.any(d<0):raise RuntimeError("invalid duration context")
-            offset=int(d[:duration_start].sum())
-            if int(d.sum())!=logits.shape[1]:raise RuntimeError("unit duration mismatch")
-            if int(d.sum())-offset>=(1 if finished else 50):
-                ids=logits[0,offset:].argmax(-1)
-                ids=np.where((ids==1)|(ids==2),5,ids)-4
-                if np.any(ids<0) or np.any(ids>=10000):raise RuntimeError("invalid acoustic unit")
+            from split_unit_durations import should_decode
+            unit_feeds={"features":feats,"chars":chars,"char_lens":lengths}
+            predicted_durations=None
+            if duration_session is not None:
                 phase_start=time.monotonic()
-                pcm=voc.run(["waveform"],{"units":ids[None,:].astype(np.int64)})[0].reshape(-1)
-                vocoder_elapsed=time.monotonic()-phase_start;phase_totals["vocoder_seconds"]+=vocoder_elapsed
-                if not np.isfinite(pcm).all() or len(pcm)==0:raise RuntimeError("invalid waveform")
-                waves.append(pcm)
-                if first_audio is None:first_audio={"source_seconds":count/100,"before_eof":not finished,"wall_seconds":time.monotonic()-start}
-                duration_start=max(0,len(d)-1)
+                predicted_durations=duration_session.run(["durations"],unit_feeds)[0]
+                phase_totals["duration_gate_seconds"]+=time.monotonic()-phase_start
+                duration_gate_calls+=1
+            if predicted_durations is not None and not should_decode(predicted_durations,duration_start,finished):
+                unit_calls_skipped+=1
+            else:
+                phase_start=time.monotonic()
+                logits,durations=unit.run(["logits","durations"],unit_feeds)
+                unit_calls+=1
+                if predicted_durations is not None:
+                    np.testing.assert_array_equal(durations,predicted_durations)
+                units_elapsed=time.monotonic()-phase_start;phase_totals["units_seconds"]+=units_elapsed
+                d=durations[0]
+                if duration_start>len(d) or np.any(d<0):raise RuntimeError("invalid duration context")
+                offset=int(d[:duration_start].sum())
+                if int(d.sum())!=logits.shape[1]:raise RuntimeError("unit duration mismatch")
+                if int(d.sum())-offset>=(1 if finished else 50):
+                    ids=logits[0,offset:].argmax(-1)
+                    ids=np.where((ids==1)|(ids==2),5,ids)-4
+                    if np.any(ids<0) or np.any(ids>=10000):raise RuntimeError("invalid acoustic unit")
+                    phase_start=time.monotonic()
+                    pcm=voc.run(["waveform"],{"units":ids[None,:].astype(np.int64)})[0].reshape(-1)
+                    vocoder_elapsed=time.monotonic()-phase_start;phase_totals["vocoder_seconds"]+=vocoder_elapsed
+                    if not np.isfinite(pcm).all() or len(pcm)==0:raise RuntimeError("invalid waveform")
+                    waves.append(pcm)
+                    if first_audio is None:first_audio={"source_seconds":count/100,"before_eof":not finished,"wall_seconds":time.monotonic()-start}
+                    duration_start=max(0,len(d)-1)
         step_decoder=phase_totals["decoder_seconds"]-decoder_before
         times.append({"source_seconds":count/100,"seconds":time.monotonic()-t0,
             "encoder_seconds":enc_elapsed,"encoder_window_start":window_start,"decoder_seconds":step_decoder,
@@ -228,6 +246,8 @@ def run(directory,fbank,out,update_frames=64,session_profile='default',source_pr
        "intra_op_threads":threads,"processing_real_time_factor":(elapsed-load_time)/(end/100),
        "update_frames":update_frames,"update_interval_ms":update_frames*10,
        "encoder_window":encoder_window,"encoder_input_frames":encoder_frames,
+       "unit_duration_gate":unit_duration_gate,"unit_calls":unit_calls,
+       "duration_gate_calls":duration_gate_calls,"unit_calls_skipped":unit_calls_skipped,
        "stage_seconds":phase_totals,"decoder_calls":decoder_calls,"decoder_input_tokens":decoder_input_tokens,
        "real_time_factor":elapsed/(end/100),"max_rss_mib":resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024,
        "first_audio":first_audio,"token_ids":tokens,"steps":times}
@@ -242,4 +262,5 @@ if __name__=="__main__":
     p.add_argument("--source-projections",action="store_true")
     p.add_argument("--threads",type=int,default=4)
     p.add_argument("--encoder-window",type=int,default=0,choices=(0,384,768,1152))
-    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window)
+    p.add_argument("--unit-duration-gate",action="store_true")
+    a=p.parse_args();run(a.directory,a.features,a.output,a.update_frames,a.session_profile,a.source_projections,a.threads,a.encoder_window,a.unit_duration_gate)
