@@ -29,7 +29,7 @@ jobs:
           run-id: '46126098483'
           github-token: ${{ github.token }}
       - name: Install TensorFlow converter
-        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4'
+        run: python -m pip install 'tensorflow-cpu==2.19.1' 'numpy==1.26.4' 'scipy==1.15.3'
       - name: Convert grouped-output FFN models
         run: |
           TF_NUM_INTRAOP_THREADS=4 TF_NUM_INTEROP_THREADS=1 python -u seamless-port/convert_tpu_ffn_grouped.py tpu-capture tpu-benchmark
