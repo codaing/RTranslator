@@ -23,6 +23,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("manifest")
     parser.add_argument("--backend", choices=("cpu", "tpu"), required=True)
+    parser.add_argument("--first-group-size", type=int, required=True)
     parser.add_argument("--tail-group-size", type=int, required=True)
     parser.add_argument("--threshold", type=float, default=0.05)
     parser.add_argument("--output", default=None)
@@ -47,7 +48,7 @@ def main():
         return matches[0]
 
     full_meta = choose("m32-full", 32)
-    first_meta = choose("m1-prefill-first", 32)
+    first_meta = choose("m1-prefill-first", args.first_group_size)
     tail_meta = choose("m31-prefill-tail", args.tail_group_size)
 
     full, full_path = load_output(root, full_meta, args.backend)
@@ -73,11 +74,14 @@ def main():
     split = np.concatenate((first, tail), axis=0)
     full_rows = row_error_metrics(full_ref, full)
     split_rows = row_error_metrics(full_ref, split)
-    first_groups = group_error_metrics(first_ref, first, 32)
+    first_groups = group_error_metrics(
+        first_ref, first, args.first_group_size
+    )
     tail_groups = group_error_metrics(tail_ref, tail, args.tail_group_size)
 
     result = {
         "backend": args.backend,
+        "first_group_size": args.first_group_size,
         "tail_group_size": args.tail_group_size,
         "source_rows": 32,
         "full_m32": {
@@ -102,6 +106,7 @@ def main():
             "p95_row_nrms": split_rows["p95_row_nrms"],
             "worst_row_index": split_rows["worst_row_index"],
             "first_row_group_max_nrms": first_groups["max_group_nrms"],
+            "first_row_group_p95_nrms": first_groups["p95_group_nrms"],
             "tail_group_max_nrms": tail_groups["max_group_nrms"],
         },
         "split_vs_m32_output_nrms": nrms(full, split),
@@ -123,7 +128,10 @@ def main():
     rendered = json.dumps(result, indent=2)
     print(rendered)
     output_path = Path(args.output) if args.output else (
-        root / f"SPLIT-ACCURACY-{args.backend}-g{args.tail_group_size}.json"
+        root / (
+            f"SPLIT-ACCURACY-{args.backend}-first-g{args.first_group_size}"
+            f"-tail-g{args.tail_group_size}.json"
+        )
     )
     output_path.write_text(rendered + "\n")
     if not result["precision_screen"]["pass"]:

@@ -87,3 +87,14 @@ The first row-split CI attempt (run 46133049584) failed before conversion becaus
 The follow-up corrects command quoting with shlex.quote, identifies the post-bias/post-ReLU expansion activation by tracing the input consumed by the grouped contraction Conv2D operations (rather than selecting an ambiguous tensor by shape), and runs physical XNNPACK before TPU. TPU output comparison now explicitly uses the matching on-device XNNPACK raw output file as --host-output, so exact backend parity is not accidentally checked against the CI-host reference tensor.
 
 A new aggregation script reassembles M=1 first-row and M=31 tail outputs, compares the reassembled 32-row result against the same M=32 source reference, and reports global, per-row, and segment-specific output-group error. These are still experimental screens using the same speech recording, not held-out speech or end-to-end translation quality.
+
+
+## First-row output-group sweep and benchmark command correction (2026-11-28)
+
+The first successful row-split conversion produced an M=1 first-row model with group size 32. Its global NRMS was 0.7899% and its row NRMS was 0.7899%, but the worst 32-channel output group reached 11.23%. The reference norm of that group is nonzero (37.25), so this is not only a zero-denominator artifact. The first-row model is not accepted under the strict per-group 5% screen.
+
+The M=31 tail passes all three preliminary thresholds at group sizes 8, 16, 32 and 64: global NRMS 3.159–3.272%, maximum row NRMS 4.616–4.734%, and maximum group NRMS 3.736–4.495%. The full M=32 baseline remains poor at maximum row NRMS 24.18% and maximum group NRMS 9.71%.
+
+Next conversion now sweeps group sizes 8, 16, 32 and 64 for both the M=1 first row and M=31 tail, and reassembles every 4x4 pairing for CPU and TPU audits. This determines whether smaller independent output groups eliminate the first-row localized error. Benchmark byte-count parsing is also corrected to strip the filename emitted by wc -c before checking the exact expected output length.
+
+The successful CI run 46133878691 is conversion-only. It generated 9 models in the first sweep artifact but did not execute the generated adb commands on a Pixel device. No physical-device latency or TPU parity is claimed from this CI result.

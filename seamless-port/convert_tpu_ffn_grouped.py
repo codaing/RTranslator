@@ -57,7 +57,7 @@ def _build_workloads(cases, tail_group_sizes):
 
     return [
         ("m32-full", full, [32], 0),
-        ("m1-prefill-first", first_rows, [32], 0),
+        ("m1-prefill-first", first_rows, tail_group_sizes, 0),
         ("m31-prefill-tail", tail_rows, tail_group_sizes, 1),
     ]
 
@@ -539,7 +539,7 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
                     f"{name}-{backend}.log'; exit 1; }}"
                 ),
                 (
-                    f"bytes=$(adb shell wc -c {output_path} | tr -d '\\r '); "
+                    f"bytes=$(adb shell wc -c {output_path} | awk '{{print $1}}' | tr -d '\\r'); "
                     f"test $bytes = {expected_bytes} || "
                     f"{{ echo 'ERROR: expected {expected_bytes} bytes, got' "
                     "$bytes; exit 1; }"
@@ -561,17 +561,24 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
     # Reassemble the split first-row + tail result and compare with
     # the single M=32 baseline for each physical backend.
     for backend in ("cpu", "tpu"):
-        for group_size in tail_group_sizes:
-            commands.extend([
-                "",
-                f"# Reassembled M=1 + M=31 split / {backend} / tail group {group_size}",
-                (
-                    "python aggregate_tpu_ffn_split.py manifest.json "
-                    f"--backend {backend} --tail-group-size {group_size} "
-                    f"--output SPLIT-ACCURACY-{backend}-g{group_size}.json"
-                    " || echo 'Split accuracy audit failed; inspect the JSON/logs'"
-                ),
-            ])
+        for first_group_size in tail_group_sizes:
+            for tail_group_size in tail_group_sizes:
+                commands.extend([
+                    "",
+                    (
+                        f"# Reassembled M=1(g{first_group_size}) + "
+                        f"M=31(g{tail_group_size}) / {backend}"
+                    ),
+                    (
+                        "python aggregate_tpu_ffn_split.py manifest.json "
+                        f"--backend {backend} "
+                        f"--first-group-size {first_group_size} "
+                        f"--tail-group-size {tail_group_size} "
+                        f"--output SPLIT-ACCURACY-{backend}-first-g{first_group_size}"
+                        f"-tail-g{tail_group_size}.json"
+                        " || echo 'Split accuracy audit failed; inspect the JSON/logs'"
+                    ),
+                ])
 
     (output_dir / "BENCHMARK-COMMANDS.txt").write_text(
         "\n".join(commands) + "\n"
@@ -580,8 +587,8 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
         "Experimental real decoder FFN row-split quantization sweep. "
         "The M=32 prefill batch is evaluated as: (1) one M=32 baseline, "
         "(2) a separate M=1 model for the first row, and (3) an M=31 model "
-        "for rows 1..31. The M=31 tail sweeps output group sizes 8, 16, 32 "
-        "and 64. The first row is calibrated only from first rows of the "
+        "for rows 1..31. Both split segments sweep output group sizes 8, 16, "
+        "32 and 64. The first row is calibrated only from first rows of the "
         "captured M=32 calls; the tail is calibrated only from the remaining "
         "31 rows. Each manifest entry reports global, per-row and per-output-"
         "group errors, plus the actual quantized expansion intermediate. "
@@ -603,7 +610,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--tail-group-sizes",
         default="8,16,32,64",
-        help="comma-separated output group sizes for the M=31 tail",
+        help="comma-separated output group sizes for both M=1 and M=31 segments",
     )
     args = parser.parse_args()
     sizes = [
