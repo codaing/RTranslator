@@ -2,7 +2,7 @@
 
 Goal: continuous Mandarin lecture audio to English speech on Pixel 9a, with no Android TextToSpeech, no Whisper/HY-MT cascade, no cloud service, and no fixed utterance cutoff.
 
-This experimental branch deliberately leaves the functioning RTranslator APK alone. It contains an offline reference runner for the actual Meta SeamlessStreaming S2ST pipeline, an ONNX component-export experiment with numerical checks, and an Android English unit-vocoder adapter. It does not yet wire the model into the Android UI. The experimental release APK built on this branch compiles the existing Android code and vocoder adapter only; it is not a SeamlessStreaming translator.
+This branch now has two deliberately separate tracks: the existing RTranslator app in :app is the immediate production path (with a low-latency speech profile), while the :seamless module remains an experimental single-model Mandarin-to-English research app. The experimental Seamless module is not yet a production translator. It contains an offline reference runner for the actual Meta SeamlessStreaming S2ST pipeline, an ONNX component-export experiment with numerical checks, and an Android English unit-vocoder adapter. It does not yet wire the model into the Android UI. The experimental release APK built on this branch compiles the existing Android code and vocoder adapter only; it is not a SeamlessStreaming translator.
 
 ## Upstream and model constraints
 
