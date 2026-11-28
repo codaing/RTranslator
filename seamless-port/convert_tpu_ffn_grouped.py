@@ -526,24 +526,23 @@ def convert(source, output, tail_group_sizes=(8, 16, 32, 64)):
                 "# Wait up to 180 seconds for the Activity to write raw output.",
                 (
                     f"for i in $(seq 1 180); do "
-                    f"if adb shell test -s \\"{output_path}\\"; then break; fi; "
+                    f"if adb shell test -s {output_path}; then break; fi; "
                     "sleep 1; done"
                 ),
-                (
+               (
                     "adb logcat -d -s tflite_BenchmarkModelActivity "
                     f"tflite ExecutionPlan Darwinn > {name}-{backend}.log"
                 ),
                 (
-                    f"adb shell test -s \\"{output_path}\\" || "
-                    f"{{ echo \\"ERROR: benchmark output missing; inspect "
-                    f"{name}-{backend}.log\\"; exit 1; }}"
+                    f"adb shell test -s {output_path} || "
+                    f"{{ echo 'ERROR: benchmark output missing; inspect "
+                    f"{name}-{backend}.log'; exit 1; }}"
                 ),
                 (
-                    f"bytes=$(adb shell wc -c < \\"{output_path}\\" | "
-                    "tr -d '\\r '); "
-                    f"test \\"$bytes\\" = \\"{expected_bytes}\\" || "
-                    f"{{ echo \\"ERROR: expected {expected_bytes} bytes, "
-                    "got $bytes\\"; exit 1; }"
+                    f"bytes=$(adb shell wc -c {output_path} | tr -d '\\r '); "
+                    f"test $bytes = {expected_bytes} || "
+                    f"{{ echo 'ERROR: expected {expected_bytes} bytes, got' "
+                    "$bytes; exit 1; }"
                 ),
                 f"adb pull {output_path} {name}-{backend}-output.bin",
                 (
