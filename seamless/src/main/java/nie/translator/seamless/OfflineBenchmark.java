@@ -32,6 +32,12 @@ final class OfflineBenchmark {
     static String run(File dir, InputStream in, BooleanSupplier cancelled, LiveAudio.Status status,
                       boolean xnnpackFp32Stages, boolean nnapiEncoder, boolean quietCpu,
                       GpuTuning gpu, String wavName) throws Exception {
+        return run(dir,in,cancelled,status,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu,wavName,StreamingEngine.UPDATE_INTERVAL_FRAMES);
+    }
+
+    static String run(File dir, InputStream in, BooleanSupplier cancelled, LiveAudio.Status status,
+                      boolean xnnpackFp32Stages, boolean nnapiEncoder, boolean quietCpu,
+                      GpuTuning gpu, String wavName, int updateFrames) throws Exception {
         short[] samples = BenchmarkWav.read(in);
         if (cancelled.getAsBoolean()) throw new CancellationException("Cancelled before model load");
 
@@ -51,11 +57,12 @@ final class OfflineBenchmark {
         final boolean[] eof = {false}, beforeEof = {false};
         final double[] energy = {0};
         int tokens;
+        boolean finalEos;
         String decoderMode, stageReport, tokenFingerprint;
         long pushNanos = 0, pssNanos = 0;
 
         try (StreamingEngine engine = new StreamingEngine(
-                dir, false, xnnpackFp32Stages, nnapiEncoder, quietCpu, gpu)) {
+                dir, false, xnnpackFp32Stages, nnapiEncoder, quietCpu, gpu, updateFrames)) {
             loadMs = SystemClock.elapsedRealtime() - loadStart;
             peak[0] = Math.max(peak[0], Debug.getPss());
             if (cancelled.getAsBoolean()) throw new CancellationException("Cancelled after model load");
@@ -101,6 +108,7 @@ final class OfflineBenchmark {
             pssNanos += System.nanoTime() - pssStart;
 
             tokens = engine.targetTokens();
+            finalEos = engine.finalEos();
             decoderMode = engine.decoderMode();
             tokenFingerprint = engine.tokenFingerprint();
             stageReport = engine.stats.report();
@@ -140,6 +148,10 @@ final class OfflineBenchmark {
                 firstSource[0] < 0 ? "none" : String.format(Locale.US, "%.2f s", firstSource[0] / 16000.0),
                 beforeEof[0] ? "yes" : "no", peak[0] / 1024.0, tokens,
                 generated[0] > 0 ? Math.sqrt(energy[0] / generated[0]) : 0)
+                + "\nBenchmark schedule: " + (updateFrames==0?"EOF-only (not streaming)":String.format(Locale.US,"%.2f s nominal update interval",updateFrames/100.0))
+                + "\nQuiet CPU thread pools: " + quietCpu
+                + "\nFinal decoder EOS reached: " + finalEos
+                + "\nOutput completeness screen (EOS and nonempty audio): " + (finalEos&&generated[0]>0?"PASS":"FAIL")
                 + "\nRequested experimental providers: " + gpu
                 + "\nToken SHA-256: " + tokenFingerprint
                 + "\nPSS sampling overhead: " + String.format(Locale.US, "%.3f s", pssNanos / 1e9)

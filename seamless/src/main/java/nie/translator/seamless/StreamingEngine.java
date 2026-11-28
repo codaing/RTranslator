@@ -24,6 +24,9 @@ final class StreamingEngine implements AutoCloseable {
     private final boolean nnapiEncoder;
     private final boolean quietCpu;
     private final GpuTuning gpu;
+    private final int updateFrames;
+    private boolean finalEos;
+    boolean finalEos(){return finalEos;}
     final StageStats stats=new StageStats();
     private final ContextBoundary boundary=new ContextBoundary();
     int contextFrames(){return frames.size();}
@@ -40,6 +43,11 @@ final class StreamingEngine implements AutoCloseable {
         this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,quietCpu,GpuTuning.CPU);
     }
     StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu)throws Exception{
+        this(dir,adaptive,xnnpackFp32Stages,nnapiEncoder,quietCpu,gpu,UPDATE_INTERVAL_FRAMES);
+    }
+    StreamingEngine(File dir,boolean adaptive,boolean xnnpackFp32Stages,boolean nnapiEncoder,boolean quietCpu,GpuTuning gpu,int updateFrames)throws Exception{
+        if(updateFrames<0)throw new IllegalArgumentException("negative update interval");
+        this.updateFrames=updateFrames;
         this.adaptive=adaptive;this.quietCpu=quietCpu;this.gpu=Objects.requireNonNull(gpu);
         if(gpu!=GpuTuning.CPU&&(xnnpackFp32Stages||nnapiEncoder))
             throw new IllegalArgumentException("Disable XNNPACK and NNAPI for WebGPU comparisons");
@@ -139,8 +147,7 @@ final class StreamingEngine implements AutoCloseable {
         stats.add(StageStats.FBANK,fbankStart,pcm.length);
         if(frames.size()>MAX_FRAMES)throw new IllegalStateException("60-second experimental context limit reached; no audio silently discarded");
         int count=frames.size()&~1;
-        if(count<2||(!finished&&count<MIN_FRAMES)||
-                (!finished&&count-lastFrameCount<UPDATE_INTERVAL_FRAMES))return;
+        if(!StreamingPolicy.shouldUpdate(count,lastFrameCount,updateFrames,finished))return;
         lastFrameCount=count;
         float[][][] encoded;
         long encoderStart=System.nanoTime();
@@ -155,7 +162,10 @@ final class StreamingEngine implements AutoCloseable {
         try(OrtSession.Result projected=project(encoded);
             DecoderCache cache=cacheLayout==null?null:new DecoderCache(env,decoder,cacheLayout,encoded,projected)){
         Prediction p=cache==null?null:cachedStep(cache,prefix(false),StageStats.PREFILL);
-        for(int i=0;i<50;i++){
+        // EOF-only benchmark starts with no accepted tokens; allow the full
+        // existing context budget, rather than silently truncating at 50.
+        int stepLimit=finished&&updateFrames==0?MAX_TOKENS+1:50;
+        for(int i=0;i<stepLimit;i++){
             if(cache==null)p=predict(prefix(false),encoded,StageStats.PREFILL);
             if(p.token==tokens.eos){eos=true;eosProbability=p.p;break;}
             if(!StreamingPolicy.write(p.p,p.token,tokens.eos,finished))break;
@@ -164,6 +174,7 @@ final class StreamingEngine implements AutoCloseable {
             accepted.add((long)p.token);
             if(cache!=null)p=cachedStep(cache,new long[]{p.token},StageStats.STEP);
         }
+        if(finished)finalEos=eos;
         boolean rollover=!finished&&boundary.candidate(adaptive,count,targetTokens(),eos,eosProbability);
         if(targetTokens()<2||(!finished&&!rollover&&oldSize==accepted.size()))return;
         boolean flushed=synthesize(encoded,cache,finished||rollover,sink);

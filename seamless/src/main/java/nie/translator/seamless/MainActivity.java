@@ -10,6 +10,8 @@ import android.os.Bundle;
 import android.provider.OpenableColumns;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.CheckBox;
+import android.widget.Spinner;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -34,6 +36,8 @@ public final class MainActivity extends Activity {
     private Button runBenchmark;
     private Button cancelBenchmark;
     private Button copyReport;
+    private Spinner schedule;
+    private CheckBox quietCpu;
 
     private Uri selectedWav;
     private String selectedWavName;
@@ -111,6 +115,18 @@ public final class MainActivity extends Activity {
         TextView benchmarkHelp = new TextView(this);
         benchmarkHelp.setText("CPU baseline · 4 intra-op threads · 1 inter-op thread. Model loading and session closing are reported separately from processing RTF.");
         panel.addView(benchmarkHelp);
+
+        schedule = new Spinner(this);
+        ArrayAdapter<String> profiles = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item,
+                new String[]{"Baseline: 0.64 s updates", "Fast: 2.56 s updates", "One pass: EOF only (not streaming)"});
+        profiles.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        schedule.setAdapter(profiles);
+        schedule.setSelection(0);
+        panel.addView(schedule);
+        quietCpu = new CheckBox(this);
+        quietCpu.setText("Disable idle CPU thread spinning");
+        quietCpu.setChecked(false);
+        panel.addView(quietCpu);
 
         runBenchmark = new Button(this);
         runBenchmark.setText("Run CPU RTF benchmark");
@@ -225,6 +241,8 @@ public final class MainActivity extends Activity {
         if (busy || selectedWav == null || !ModelPack.present(modelDir())) return;
         final Uri wav = selectedWav;
         final String wavName = selectedWavName == null ? displayName(wav) : selectedWavName;
+        final int updateFrames = new int[]{64,256,0}[schedule.getSelectedItemPosition()];
+        final boolean quiet = quietCpu.isChecked();
 
         busy = true;
         benchmarkRunning = true;
@@ -242,8 +260,8 @@ public final class MainActivity extends Activity {
                         modelDir(), in,
                         () -> cancelRequested || closed,
                         this::publishStatus,
-                        false, false, false, GpuTuning.CPU,
-                        wavName);
+                        false, false, quiet, GpuTuning.CPU,
+                        wavName, updateFrames);
             } catch (Exception | OutOfMemoryError e) {
                 result = "Benchmark failed or was cancelled:\n" + e;
             }
@@ -304,6 +322,8 @@ public final class MainActivity extends Activity {
         wavInfo.setText(selectedWav == null
                 ? "No WAV selected."
                 : "Selected: " + selectedWavName);
+        schedule.setEnabled(!busy);
+        quietCpu.setEnabled(!busy);
         importModels.setEnabled(!busy);
         chooseWav.setEnabled(!busy);
         runBenchmark.setEnabled(!busy && modelReady && selectedWav != null);

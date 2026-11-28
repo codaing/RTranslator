@@ -5,6 +5,10 @@ import java.util.Arrays;
 /** Pure-Java policy functions independently tested without checkpoints. */
 public final class StreamingPolicy {
     private StreamingPolicy(){}
+    /** 0 = end-of-file only; positive intervals are in 10 ms feature frames. */
+    static boolean shouldUpdate(int count,int previous,int interval,boolean finished){
+        return count>=2&&(finished||(interval>0&&count>=192&&count-previous>=interval));
+    }
     public static int argmax(float[] scores){
         if(scores.length==0)throw new IllegalArgumentException("empty logits");
         int best=0;
