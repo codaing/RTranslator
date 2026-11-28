@@ -23,9 +23,15 @@ public class RuntimeTest {
         }
         org.junit.Assume.assumeTrue("real model projection fixture is not embedded in this APK",fixturePresent);
         String report=VulkanProbe.realProjection(target);
-        android.util.Log.i("RealProjectionProbe",report.replace('\n',' '));
-        assertTrue("Actual model Vulkan projection must match CPU ONNX Runtime: "+report,
-                report.contains("Vulkan real-model fused-4 projection") && report.contains(": PASS"));
+        for(String line:report.split("\\n"))android.util.Log.i("RealProjectionProbe",line);
+        assertFalse("Vulkan comparison failed: "+report,report.contains("FAIL"));
+        for(String variant:new String[]{"fused-4","multirow-2","multirow-4","multirow-8"}){
+            String prefix="Vulkan real-model "+variant+" projection ";
+            boolean passed=false;
+            for(String line:report.split("\\n"))
+                if(line.startsWith(prefix)&&line.contains(": PASS")&&line.contains("outputs checked"))passed=true;
+            assertTrue("Missing actual model parity for "+variant+": "+report,passed);
+        }
     }
 
     @Test public void vocoderInterfaceExecutesOnAndroid() throws Exception {

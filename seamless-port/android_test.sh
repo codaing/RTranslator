@@ -16,6 +16,8 @@ grep -F 'FP32_GPU_ONLY_PASS' install-diagnostics/webgpu-probe.txt
 grep -E 'FP16_CHAIN_(PASS|NOT_TESTED)' install-diagnostics/webgpu-probe.txt
 if [[ "${REQUIRE_REAL_PROJECTION:-0}" == "1" ]]; then
   adb logcat -d -s RealProjectionProbe:I '*:S' > install-diagnostics/real-projection-probe.txt
-  grep -F 'Vulkan real-model fused-4 projection' install-diagnostics/real-projection-probe.txt | grep -F ': PASS'
+  for variant in fused-4 multirow-2 multirow-4 multirow-8; do
+    grep -F "Vulkan real-model $variant projection" install-diagnostics/real-projection-probe.txt | grep -F ': PASS'
+  done
 fi
 grep -E 'OK \((9|10) tests\)' install-diagnostics/instrumentation.txt

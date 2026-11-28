@@ -16,6 +16,9 @@
 #include "gemv_fused8_shader.h"
 #include "gemv_fused16_shader.h"
 #include "real_projection_shader.h"
+#include "real_projection_rows2_shader.h"
+#include "real_projection_rows4_shader.h"
+#include "real_projection_rows8_shader.h"
 #include <algorithm>
 #include <cstring>
 
@@ -33,6 +36,8 @@ struct Resources {
     VkPipelineLayout layout=VK_NULL_HANDLE;
     VkShaderModule shader=VK_NULL_HANDLE;
     VkPipeline pipeline=VK_NULL_HANDLE;
+    std::vector<VkPipeline> comparisonPipelines;
+    std::vector<VkShaderModule> comparisonShaders;
     VkCommandPool commands=VK_NULL_HANDLE;
     VkFence fence=VK_NULL_HANDLE;
     VkQueryPool queryPool=VK_NULL_HANDLE;
@@ -47,6 +52,8 @@ struct Resources {
             if(queryPool)vkDestroyQueryPool(device,queryPool,nullptr);
             if(fence)vkDestroyFence(device,fence,nullptr);
             if(commands)vkDestroyCommandPool(device,commands,nullptr);
+            for(auto p:comparisonPipelines)if(p)vkDestroyPipeline(device,p,nullptr);
+            for(auto s:comparisonShaders)if(s)vkDestroyShaderModule(device,s,nullptr);
             if(pipeline)vkDestroyPipeline(device,pipeline,nullptr);
             if(shader)vkDestroyShaderModule(device,shader,nullptr);
             if(layout)vkDestroyPipelineLayout(device,layout,nullptr);
@@ -218,10 +225,131 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
         VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};pli.setLayoutCount=1;pli.pSetLayouts=&r.setLayout;
         if(realProjection||(rows&&!fused&&!subgroup)){pli.pushConstantRangeCount=1;pli.pPushConstantRanges=&range;}
         check(vkCreatePipelineLayout(r.device,&pli,nullptr,&r.layout),"pipeline layout");
+
+        if(realProjection){
+            // One device, descriptor set and packed weight buffer for all variants.
+            // Rotate the order each round to reduce thermal/clock ordering bias.
+            struct Variant {
+                uint32_t tile; const uint32_t* code; size_t bytes;
+                VkCommandBuffer cmd=VK_NULL_HANDLE;
+                double setupMs=0, maxAbs=0, nrms=0;
+                std::vector<double> wallUs,gpuUs;
+            };
+            Variant variants[]={
+                {1,real_projection_shader,sizeof(real_projection_shader)},
+                {2,real_projection_rows2_shader,sizeof(real_projection_rows2_shader)},
+                {4,real_projection_rows4_shader,sizeof(real_projection_rows4_shader)},
+                {8,real_projection_rows8_shader,sizeof(real_projection_rows8_shader)}
+            };
+            VkCommandPoolCreateInfo cpi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};cpi.queueFamilyIndex=family;
+            check(vkCreateCommandPool(r.device,&cpi,nullptr,&r.commands),"comparison command pool");
+            VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            check(vkCreateFence(r.device,&fi,nullptr,&r.fence),"comparison fence");
+            const double commonSetupMs=std::chrono::duration<double,std::milli>(
+                std::chrono::steady_clock::now()-setupStart).count();
+            for(auto& v:variants){
+                auto start=std::chrono::steady_clock::now();
+                r.comparisonShaders.push_back(VK_NULL_HANDLE);
+                VkShaderModuleCreateInfo si{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};si.codeSize=v.bytes;si.pCode=v.code;
+                check(vkCreateShaderModule(r.device,&si,nullptr,&r.comparisonShaders.back()),"comparison shader");
+                r.comparisonPipelines.push_back(VK_NULL_HANDLE);
+                VkComputePipelineCreateInfo pci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+                pci.layout=r.layout;pci.stage.sType=VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                pci.stage.stage=VK_SHADER_STAGE_COMPUTE_BIT;pci.stage.module=r.comparisonShaders.back();pci.stage.pName="main";
+                check(vkCreateComputePipelines(r.device,VK_NULL_HANDLE,1,&pci,nullptr,&r.comparisonPipelines.back()),"comparison pipeline");
+                VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+                cai.commandPool=r.commands;cai.level=VK_COMMAND_BUFFER_LEVEL_PRIMARY;cai.commandBufferCount=1;
+                check(vkAllocateCommandBuffers(r.device,&cai,&v.cmd),"comparison command buffer");
+                VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                check(vkBeginCommandBuffer(v.cmd,&begin),"comparison begin");
+                if(r.queryPool){
+                    vkCmdResetQueryPool(v.cmd,r.queryPool,0,2);
+                    vkCmdWriteTimestamp(v.cmd,VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,r.queryPool,0);
+                }
+                vkCmdBindPipeline(v.cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.comparisonPipelines.back());
+                vkCmdBindDescriptorSets(v.cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.layout,0,1,&set,0,nullptr);
+                uint32_t params[3]={K,N,uint32_t(rows)};
+                vkCmdPushConstants(v.cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,12,params);
+                vkCmdDispatch(v.cmd,N/4,(uint32_t(rows)+v.tile-1)/v.tile,1);
+                if(r.queryPool)vkCmdWriteTimestamp(v.cmd,VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,r.queryPool,1);
+                VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                barrier.srcAccessMask=VK_ACCESS_SHADER_WRITE_BIT;barrier.dstAccessMask=VK_ACCESS_HOST_READ_BIT;
+                vkCmdPipelineBarrier(v.cmd,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,VK_PIPELINE_STAGE_HOST_BIT,0,1,&barrier,0,nullptr,0,nullptr);
+                check(vkEndCommandBuffer(v.cmd),"comparison end");
+                v.setupMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();
+            }
+            auto words=static_cast<uint32_t*>(r.mapped);
+            bool submitted=false;
+            auto submitVariant=[&](Variant& v,bool measure){
+                if(submitted)check(vkResetFences(r.device,1,&r.fence),"comparison reset fence");
+                VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};submit.commandBufferCount=1;submit.pCommandBuffers=&v.cmd;
+                auto start=std::chrono::steady_clock::now();
+                check(vkQueueSubmit(queue,1,&submit,r.fence),"comparison submit");
+                r.pending=true;
+                VkResult wait=vkWaitForFences(r.device,1,&r.fence,VK_TRUE,5000000000ULL);
+                if(wait!=VK_SUCCESS){timedOut.store(true);throw std::runtime_error("comparison fence wait failed; restart app");}
+                r.pending=false;submitted=true;
+                double elapsed=std::chrono::duration<double,std::micro>(std::chrono::steady_clock::now()-start).count();
+                if(measure){
+                    v.wallUs.push_back(elapsed);
+                    if(r.queryPool){
+                        uint64_t ts[2]={0,0};
+                        check(vkGetQueryPoolResults(r.device,r.queryPool,0,2,sizeof(ts),ts,sizeof(uint64_t),VK_QUERY_RESULT_64_BIT),"comparison timestamps");
+                        uint64_t delta=ts[1]-ts[0];
+                        if(timestampBits<64)delta&=((uint64_t(1)<<timestampBits)-1);
+                        v.gpuUs.push_back(double(delta)*prop.limits.timestampPeriod/1000.0);
+                    }
+                }
+            };
+            auto validate=[&](Variant& v){
+                // Poison every output before an independent, untimed dispatch;
+                // another variant's correct output must never hide missing writes.
+                std::fill(words+aCount+bCount,words+aCount+bCount+cCount,0x7fc00000u);
+                submitVariant(v,false);
+                double sumError=0,sumReference=0;
+                v.maxAbs=0;
+                for(uint32_t i=0;i<cCount;i++){
+                    float got;std::memcpy(&got,words+aCount+bCount+i,4);
+                    if(!std::isfinite(got))throw std::runtime_error("tile "+std::to_string(v.tile)+" unwritten/nonfinite output "+std::to_string(i));
+                    double diff=double(got)-cpuExpected[i];
+                    sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
+                    v.maxAbs=std::max(v.maxAbs,std::abs(diff));
+                }
+                v.nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
+                if(v.nrms>0.002||v.maxAbs>0.01)
+                    throw std::runtime_error("tile "+std::to_string(v.tile)+" CPU ORT parity failed: NRMS="+std::to_string(v.nrms)+" max_abs="+std::to_string(v.maxAbs));
+            };
+            for(auto& v:variants)validate(v);
+            // Complete all warmups before measurement. 32 warmups and 12 samples
+            // per variant; 12 is divisible by four for balanced slot ordering.
+            for(int round=0;round<44;round++)
+                for(int slot=0;slot<4;slot++)submitVariant(variants[(round+slot)%4],round>=32);
+            for(auto& v:variants)validate(v);
+            out<<"Shared Vulkan setup "<<commonSetupMs<<" ms | activation copy "<<fixtureCopyMs
+               <<" ms | FP16 weight pack+mapped write "<<weightPackMs<<" ms (included in shared setup)\n";
+            for(auto& v:variants){
+                std::sort(v.wallUs.begin(),v.wallUs.end());
+                std::sort(v.gpuUs.begin(),v.gpuUs.end());
+                auto median=[](const std::vector<double>& a){return (a[(a.size()-1)/2]+a[a.size()/2])*0.5;};
+                double wall=median(v.wallUs);
+                double gpu=v.gpuUs.empty()?0:median(v.gpuUs);
+                out<<"Vulkan real-model "<<(v.tile==1?"fused-4":"multirow-"+std::to_string(v.tile))
+                   <<" projection "<<rows<<"x"<<K<<"x"<<N<<": PASS | FP16 weights / FP32 accumulation"
+                   <<" | CPU ONNX Runtime FP32 reference: all "<<cCount<<" outputs checked"
+                   <<" | max_abs "<<v.maxAbs<<" | NRMS "<<v.nrms
+                   <<" | workgroups "<<(N/4)*((uint32_t(rows)+v.tile-1)/v.tile)
+                   <<" | median GPU "<<(v.gpuUs.empty()?std::string("unavailable"):std::to_string(gpu/1000.0)+" ms");
+                if(!v.gpuUs.empty())out<<" | GPU range "<<v.gpuUs.front()/1000.0<<"-"<<v.gpuUs.back()/1000.0<<" ms";
+                out<<" | median queue+fence "<<wall/1000.0<<" ms | queue+fence range "
+                   <<v.wallUs.front()/1000.0<<"-"<<v.wallUs.back()/1000.0<<" ms"
+                   <<" | pipeline+command setup "<<v.setupMs<<" ms | 32 warmups, 12 interleaved measured submissions\n";
+            }
+            if(prop.deviceType==VK_PHYSICAL_DEVICE_TYPE_CPU)out<<"[software CPU device]";
+            return env->NewStringUTF(out.str().c_str());
+        }
         const uint32_t* shaderCode=probe_shader;
         size_t shaderBytes=sizeof(probe_shader);
-        if(realProjection){shaderCode=real_projection_shader;shaderBytes=sizeof(real_projection_shader);}
-        else if(subgroup){
+        if(subgroup){
             if(subgroupProps.subgroupSize==16){shaderCode=gemv_subgroup16_shader;shaderBytes=sizeof(gemv_subgroup16_shader);}
             else {shaderCode=gemv_subgroup32_shader;shaderBytes=sizeof(gemv_subgroup32_shader);}
         }else if(fused){
@@ -248,11 +376,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
         vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,r.layout,0,1,&set,0,nullptr);
         if(rows){
             uint32_t m=uint32_t(rows);
-            if(realProjection){
-                uint32_t params[3]={K,N,m};
-                vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,12,params);
-                vkCmdDispatch(cmd,N/4,m,1);
-            }else{
+            {
                 if(!fused&&!subgroup)vkCmdPushConstants(cmd,r.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,4,&m);
                 if(gemv){
                     for(int d=0;d<dispatches;d++){
@@ -303,21 +427,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
                 }
             }
         }
-        if(realProjection){
-            auto words=static_cast<uint32_t*>(r.mapped);
-            double sumError=0.0,sumReference=0.0,maxAbs=0.0;
-            for(uint32_t i=0;i<cCount;i++){
-                float got;std::memcpy(&got,words+aCount+bCount+i,4);
-                if(!std::isfinite(got))throw std::runtime_error("non-finite real-model projection output at index "+std::to_string(i));
-                double diff=double(got)-cpuExpected[i];
-                sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
-                maxAbs=std::max(maxAbs,std::abs(diff));
-            }
-            const double nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
-            if(nrms>0.002||maxAbs>0.01)
-                throw std::runtime_error("CPU ONNX Runtime parity failed: NRMS="+std::to_string(nrms)+
-                    " max_abs="+std::to_string(maxAbs));
-        }else if(rows){
+        if(rows){
             // Validate the final output only after all timings to avoid CPU-side
             // reference work perturbing device clocks between measured submits.
             auto words=static_cast<uint32_t*>(r.mapped);
@@ -348,29 +458,7 @@ Java_nie_translator_seamless_VulkanProbe_nativeRun(JNIEnv* env,jclass,jint mode,
         }else for(int i=0;i<16;i++)if(!std::isfinite(values[i])||std::abs(values[i]-2.f*(i+1))>0.0001f)throw std::runtime_error("compute readback mismatch");
         std::sort(wallUs.begin(),wallUs.end());
         std::sort(gpuUs.begin(),gpuUs.end());
-        if(realProjection){
-            double wallMedian=wallUs[wallUs.size()/2];
-            double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
-            double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;
-            double sumError=0.0,sumReference=0.0,maxAbs=0.0;
-            auto words=static_cast<uint32_t*>(r.mapped);
-            for(uint32_t i=0;i<cCount;i++){
-                float got;std::memcpy(&got,words+aCount+bCount+i,4);
-                double diff=double(got)-cpuExpected[i];
-                sumError+=diff*diff;sumReference+=double(cpuExpected[i])*cpuExpected[i];
-                maxAbs=std::max(maxAbs,std::abs(diff));
-            }
-            double nrms=std::sqrt(sumError/std::max(sumReference,1e-30));
-            out<<"Vulkan real-model fused-4 projection "<<rows<<"x"<<K<<"x"<<N<<": PASS | FP16 weights / FP32 accumulation"
-               <<" | CPU ONNX Runtime FP32 reference: all "<<cCount<<" outputs checked"
-               <<" | max_abs "<<maxAbs<<" | NRMS "<<nrms
-               <<" | median GPU "<<(gpuUs.empty()?std::string("unavailable"):std::to_string(gpuMedian/1000.0)+" ms")
-               <<" | median queue+fence "<<wallMedian/1000.0<<" ms"
-               <<" | GPU us/dispatch "<<(gpuUs.empty()?0:gpuMedian)
-               <<" | "<<(2.0*rows*K*N/std::max(1.0,kernelUs)/1000.0)<<" GFLOP/s"
-               <<" | activation copy "<<fixtureCopyMs<<" ms | FP16 weight pack+mapped write "<<weightPackMs<<" ms | setup "<<setupMs<<" ms"
-               <<" | 32 warmups, 11 measured submissions; setup excluded from GPU median";
-        }else if(rows){
+        if(rows){
             double wallMedian=wallUs[wallUs.size()/2];
             double gpuMedian=gpuUs.empty()?0:gpuUs[gpuUs.size()/2];
             double kernelUs=gpuUs.empty()?wallMedian:gpuMedian;

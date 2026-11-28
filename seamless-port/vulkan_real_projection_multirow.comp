@@ -1,0 +1,48 @@
+#version 450
+// Real projection: output-major packed FP16 weights, FP32 activations/accumulation.
+// Each lane loads four weight pairs once and applies them to ROWS activation rows.
+#ifndef ROWS
+#define ROWS 2
+#endif
+layout(local_size_x=32,local_size_y=1,local_size_z=1) in;
+layout(push_constant) uniform Params { uint K; uint N; uint M; } params;
+layout(set=0,binding=0,std430) buffer Values { uint v[]; } data;
+shared vec4 partial[ROWS][32];
+void main(){
+    uint K=params.K, N=params.N, M=params.M;
+    uint firstRow=gl_WorkGroupID.y*uint(ROWS);
+    uint first=gl_WorkGroupID.x*4u;
+    uint lane=gl_LocalInvocationID.x;
+    if(firstRow>=M || first+3u>=N)return;
+    vec4 accum[ROWS];
+    for(uint r=0u;r<uint(ROWS);r++)accum[r]=vec4(0.0);
+    uint weightBase=M*K+first*(K/2u);
+    for(uint p=lane;p<K/2u;p+=32u){
+        vec2 w0=unpackHalf2x16(data.v[weightBase+p]);
+        vec2 w1=unpackHalf2x16(data.v[weightBase+K/2u+p]);
+        vec2 w2=unpackHalf2x16(data.v[weightBase+K+p]);
+        vec2 w3=unpackHalf2x16(data.v[weightBase+3u*(K/2u)+p]);
+        for(uint r=0u;r<uint(ROWS);r++){
+            if(firstRow+r<M){
+                uint base=(firstRow+r)*K+2u*p;
+                vec2 a=vec2(uintBitsToFloat(data.v[base]),uintBitsToFloat(data.v[base+1u]));
+                accum[r]+=vec4(dot(a,w0),dot(a,w1),dot(a,w2),dot(a,w3));
+            }
+        }
+    }
+    for(uint r=0u;r<uint(ROWS);r++)partial[r][lane]=accum[r];
+    barrier();
+    for(uint offset=16u;offset>0u;offset>>=1u){
+        if(lane<offset)
+            for(uint r=0u;r<uint(ROWS);r++)partial[r][lane]+=partial[r][lane+offset];
+        barrier();
+    }
+    if(lane==0u){
+        for(uint r=0u;r<uint(ROWS);r++){
+            if(firstRow+r<M){
+                uint base=M*K+K*N/2u+(firstRow+r)*N+first;
+                for(uint o=0u;o<4u;o++)data.v[base+o]=floatBitsToUint(partial[r][0][o]);
+            }
+        }
+    }
+}
